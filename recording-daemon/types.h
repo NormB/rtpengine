@@ -16,6 +16,7 @@
 #include "codeclib.h"
 #include "poller.h"
 #include "socket.h"
+#include "containers.h"
 
 
 struct iphdr;
@@ -54,7 +55,10 @@ struct stream_s {
 	unsigned long tag;
 	int fd;
 	handler_t handler;
-	int forwarding_on:1;
+	unsigned int forwarding_on:1;
+	double start_time;
+	unsigned int media_sdp_id;
+	unsigned int channel_slot;
 };
 typedef struct stream_s stream_t;
 
@@ -86,12 +90,14 @@ struct ssrc_s {
 	format_t tls_fwd_format;
 	resample_t tls_fwd_resampler;
 	socket_t tls_fwd_sock;
+	uint64_t tls_in_pts;
+	AVFrame *tls_silence_frame;
 	//BIO *bio;
 	SSL_CTX *ssl_ctx;
 	SSL *ssl;
 	struct streambuf *tls_fwd_stream;
 	struct poller tls_fwd_poller;
-	int sent_intro:1;
+	unsigned int sent_intro:1;
 };
 typedef struct ssrc_s ssrc_t;
 
@@ -100,8 +106,16 @@ struct tag_s {
 	unsigned long id;
 	char *name;
 	char *label;
+	char *metadata;
 };
 typedef struct tag_s tag_t;
+
+
+INLINE void str_q_free(str_q *q) {
+	t_queue_clear_full(q, str_free);
+	t_queue_free(q);
+}
+TYPED_GHASHTABLE(metadata_ht, str, str_q, str_hash, str_equal, str_free, str_q_free)
 
 
 struct metafile_s {
@@ -109,10 +123,16 @@ struct metafile_s {
 	char *name;
 	char *parent;
 	char *call_id;
+	char *random_tag;
 	char *metadata;
-	char *metadata_db;
+	metadata_ht metadata_parsed;
+	char *output_dest;
+	char *output_path;
+	char *output_pattern;
 	off_t pos;
 	unsigned long long db_id;
+	unsigned int db_streams;
+	double start_time;
 
 	GStringChunk *gsc; // XXX limit max size
 
@@ -130,33 +150,35 @@ struct metafile_s {
 
 	pthread_mutex_t payloads_lock;
 	char *payload_types[128];
+	char *payload_formats[128];
 	int payload_ptimes[128];
 	int media_ptimes[4];
 
-	int recording_on:1;
-	int forwarding_on:1;
+	unsigned int recording_on:1;
+	unsigned int forwarding_on:1;
+	unsigned int discard:1;
+	unsigned int db_metadata_done:1;
+	unsigned int skip_db:1;
 };
 
 
 struct output_s {
-	char full_filename[PATH_MAX], // path + filename
-		file_path[PATH_MAX],
-		file_name[PATH_MAX];
+	char *full_filename, // path + filename
+		*file_path,
+		*file_name,
+		*filename; // path + filename + suffix
 	const char *file_format;
+	const char *kind; // "mixed" or "single"
 	unsigned long long db_id;
+	gboolean skip_filename_extension;
+	unsigned int channel_mult;
+	double start_time;
 
-//	format_t requested_format,
-//		 actual_format;
-
-//	AVCodecContext *avcctx;
 	AVFormatContext *fmtctx;
 	AVStream *avst;
-//	AVPacket avpkt;
-//	AVAudioFifo *fifo;
-//	int64_t fifo_pts; // pts of first data in fifo
-//	int64_t mux_dts; // last dts passed to muxer
-//	AVFrame *frame;
 	encoder_t *encoder;
+	format_t requested_format,
+		 actual_format;
 };
 
 

@@ -3,12 +3,14 @@ Section: net
 Priority: optional
 Maintainer: Sipwise Development Team <support@sipwise.com>
 Homepage: https://www.sipwise.com/
-Standards-Version: 3.9.8
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
 Build-Depends:
- debhelper-compat (= 12),
+ debhelper-compat (= 13),
  default-libmysqlclient-dev,
+ dh-sequence-dkms,
+ discount,
  gperf,
- iptables-dev (>= 1.4),
  libavcodec-dev (>= 6:10),
  libavfilter-dev (>= 6:10),
  libavformat-dev (>= 6:10),
@@ -21,106 +23,98 @@ Build-Depends:
  libdigest-crc-perl,
  libdigest-hmac-perl,
  libevent-dev (>= 2.0),
- libglib2.0-dev (>= 2.30),
+ libglib2.0-dev (>= 2.44),
  libhiredis-dev,
  libio-multiplex-perl,
  libio-socket-inet6-perl,
  libio-socket-ip-perl,
  libiptc-dev,
  libjson-glib-dev,
+ libjson-perl,
+ libmnl-dev,
+ libmosquitto-dev,
+ libncurses-dev,
  libnet-interface-perl,
+ libnftnl-dev,
+ libopus-dev,
  libpcap0.8-dev,
- libpcre3-dev,
+ libpcre2-dev,
  libsocket6-perl,
  libspandsp-dev,
  libssl-dev (>= 1.0.1),
  libswresample-dev (>= 6:10),
  libsystemd-dev,
+ libtest2-suite-perl,
+ liburing-dev (>= 2.3) <!pkg.ngcp-rtpengine.nouring>,
+ libwebsockets-dev,
  libxmlrpc-core-c3-dev (>= 1.16.07),
- markdown,
+ libxtables-dev (>= 1.4) | iptables-dev (>= 1.4),
+ ngcp-libcodec-chain-dev (>= 12.5) <pkg.ngcp-rtpengine.codec-chain>,
+ pandoc,
+ pkgconf,
+ python3,
+ python3-websockets,
+ systemd-dev | systemd,
  zlib1g-dev,
+Testsuite: autopkgtest-pkg-dkms
 
 Package: ngcp-rtpengine-daemon
 Architecture: any
+Multi-Arch: foreign
 Recommends:
+ ngcp-rtpengine-perftest <!pkg.ngcp-rtpengine.no-transcoding>,
  ngcp-rtpengine-recording-daemon,
  ngcp-rtpengine-utils,
 Suggests:
  ngcp-system-tools,
+Provides:
+ ngcp-rtpengine-iptables,
+Conflicts:
+ ngcp-rtpengine-iptables,
+Replaces:
+ ngcp-rtpengine-iptables,
+Pre-Depends:
+ adduser,
+ ${misc:Pre-Depends},
 Depends:
- lsb-base (>= 3.0-6),
+ sysvinit-utils (>= 3.05-4~) | lsb-base (>= 3.0-6),
  ${misc:Depends},
  ${shlibs:Depends},
-Conflicts:
- ngcp-mediaproxy-ng-daemon,
- ngcp-rtpengine-redis1,
-Replaces:
- ngcp-mediaproxy-ng-daemon,
- ngcp-rtpengine-redis1,
 Description: proxy for RTP and media streams used in NGCP, userspace part
  This daemon handles the first stages of proxying media streams and talks to
  the kernel part of the proxy for eventual high-performance packet forwarding.
 
 Package: ngcp-rtpengine-recording-daemon
 Architecture: any
+Build-Profiles: <!pkg.ngcp-rtpengine.no-transcoding>
+Multi-Arch: foreign
 Recommends:
  ngcp-rtpengine-utils,
 Suggests:
  ngcp-system-tools,
 Depends:
- lsb-base (>= 3.0-6),
  nfs-common,
+ ngcp-rtpengine-daemon,
+ sysvinit-utils (>= 3.05-4~) | lsb-base (>= 3.0-6),
  ${misc:Depends},
  ${shlibs:Depends},
 Description: recording daemon for RTP and media streams
  This daemon handles the call recording (media intercept) component of rtpengine.
 
-Package: ngcp-rtpengine-iptables
-Architecture: any
-Depends:
- ${misc:Depends},
- ${shlibs:Depends},
-Conflicts:
- ngcp-mediaproxy-ng-iptables,
-Replaces:
- ngcp-mediaproxy-ng-iptables,
-Description: IPtables extension module for the kernel-space NGCP media proxy
- Provides the IPtables extension needed to configure the mediaproxy rule.
-
 Package: ngcp-rtpengine
 Architecture: all
+Multi-Arch: foreign
 Depends:
  ngcp-rtpengine-daemon (>= ${source:Version}),
- ngcp-rtpengine-iptables (>= ${source:Version}),
  ngcp-rtpengine-kernel-dkms (>= ${source:Version}),
- ngcp-rtpengine-recording-daemon (>= ${source:Version}),
+ ngcp-rtpengine-perftest (>= ${source:Version}) <!pkg.ngcp-rtpengine.no-transcoding>,
+ ngcp-rtpengine-recording-daemon (>= ${source:Version}) <!pkg.ngcp-rtpengine.no-transcoding>,
  ngcp-rtpengine-utils (>= ${source:Version}),
  ${misc:Depends},
-Conflicts:
- ngcp-mediaproxy-ng,
-Replaces:
- ngcp-mediaproxy-ng,
 Description: NGCP RTP/media proxy - meta package
  This is a meta package for easy installation of all four parts of the NGCP
  media proxy. It will install the user-space daemon, the kernel-space IPtables
  module, the IPtables extension module and utility scripts.
-
-Package: ngcp-rtpengine-kernel-source
-Architecture: all
-Section: kernel
-Depends:
- debhelper-compat (= 12),
- module-assistant,
- ${misc:Depends},
-Conflicts:
- ngcp-mediaproxy-ng-kernel-source,
-Replaces:
- ngcp-mediaproxy-ng-kernel-source,
-Description: IPtables kernel module for the NGCP media proxy - source
- Provides the kernel-space part of the NGCP media proxy for high-
- performance packet forwarding.
- This package contains the source to be built with module-assistant or
- kernel-package.
 
 Package: ngcp-rtpengine-kernel-dkms
 Architecture: all
@@ -128,13 +122,8 @@ Section: kernel
 Suggests:
  ngcp-system-tools,
 Depends:
- dkms (>= 1.95),
  lsb-release,
  ${misc:Depends},
-Conflicts:
- ngcp-mediaproxy-ng-kernel-dkms,
-Replaces:
- ngcp-mediaproxy-ng-kernel-dkms,
 Description: IPtables kernel module for the NGCP media proxy - DKMS
  Provides the kernel-space part of the NGCP media proxy for high-
  performance packet forwarding.
@@ -142,15 +131,43 @@ Description: IPtables kernel module for the NGCP media proxy - DKMS
 
 Package: ngcp-rtpengine-utils
 Architecture: all
+Multi-Arch: foreign
 Depends:
  libbencode-perl,
+ libconfig-tiny-perl,
  libcrypt-rijndael-perl,
  libdigest-hmac-perl,
  libio-socket-inet6-perl,
  libio-socket-ip-perl,
+ libjson-perl,
  libsocket6-perl,
  netcat-openbsd | netcat,
  ${misc:Depends},
  ${perl:Depends},
 Description: scripts and Perl modules for NGCP rtpengine
  This package contains scripts and Perl modules for NGCP rtpengine
+
+Package: ngcp-rtpengine-perftest
+Architecture: any
+Build-Profiles: <!pkg.ngcp-rtpengine.no-transcoding>
+Multi-Arch: foreign
+Depends:
+ ngcp-rtpengine-perftest-data (= ${source:Version}),
+ ${misc:Depends},
+ ${shlibs:Depends},
+Description: helper tool to test rtpengine transcoding performance
+ This interactive tool simulates transcoding scenarios using the rtpengine code
+ base and produces performance and load statistics.
+
+Package: ngcp-rtpengine-perftest-data
+Architecture: all
+Multi-Arch: foreign
+Build-Profiles: <!pkg.ngcp-rtpengine.no-transcoding>
+Depends:
+ ${misc:Depends},
+ ${shlibs:Depends},
+Description: helper tool to test rtpengine transcoding performance - data files
+ This interactive tool simulates transcoding scenarios using the rtpengine code
+ base and produces performance and load statistics.
+ .
+ These are data files needed for the binary package.

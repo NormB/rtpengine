@@ -4,23 +4,25 @@
 
 #include "str.h"
 #include "loglib.h"
+#include "types.h"
 
 
 
-struct call;
-struct stream_fd;
 struct ice_agent;
 enum log_format;
 
 struct log_info {
 	union {
-		struct call *call;
-		struct stream_fd *stream_fd;
+		call_t *call;
+		stream_fd *stream_fd;
 		const str *str;
 		const char *cstr;
 		struct ice_agent *ice_agent;
 		void *ptr;
-	} u;
+	};
+	union {
+		struct call_media *media;
+	};
 	enum {
 		LOG_INFO_NONE = 0,
 		LOG_INFO_CALL,
@@ -28,6 +30,7 @@ struct log_info {
 		LOG_INFO_STR,
 		LOG_INFO_C_STRING,
 		LOG_INFO_ICE_AGENT,
+		LOG_INFO_MEDIA,
 	} e;
 };
 
@@ -36,7 +39,8 @@ extern int _log_facility_rtcp;
 extern int _log_facility_dtmf;
 
 
-extern struct log_info __thread log_info;
+extern __thread struct log_info log_info;
+extern __thread GSList *log_info_stack;
 
 
 
@@ -52,7 +56,7 @@ void __ilog(int prio, const char *fmt, ...) __attribute__ ((format (printf, 2, 3
 #ifdef __DEBUG
 #define __C_DBG(x...) ilog(LOG_DEBUG, x)
 #else
-#define __C_DBG(x...) ((void)0)
+#define __C_DBG(x...) ilogs(internals, LOG_DEBUG, x)
 #endif
 
 

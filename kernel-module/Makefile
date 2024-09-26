@@ -24,8 +24,6 @@ ifeq ($(RTPENGINE_VERSION),)
 endif
 EXTRA_CFLAGS+=	-DRTPENGINE_VERSION="\"$(RTPENGINE_VERSION)\""
 
-EXTRA_CFLAGS += -D__RE_EXTERNAL
-
 obj-m        += xt_RTPENGINE.o
 
 .PHONY:		modules clean patch install
@@ -40,3 +38,5 @@ patch:
 		../utils/patch-kernel magic "$(PWD)" "$(KERNEL)" "$(RTPENGINE_VERSION)"
 
 install:
+	install -D xt_RTPENGINE.ko $(DESTDIR)/lib/modules/$(shell uname -r)/updates/xt_RTPENGINE.ko
+	depmod -a

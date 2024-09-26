@@ -8,235 +8,349 @@
 #include <unistd.h>
 #include <glib.h>
 #include <errno.h>
+#include <sys/mman.h>
+
+#include "helpers.h"
+#include "log.h"
+#include "bufferpool.h"
+#include "main.h"
+#include "statistics.h"
 
 #include "xt_RTPENGINE.h"
 
-#include "aux.h"
-#include "log.h"
-
-
-
-
 #define PREFIX "/proc/rtpengine"
-
-
-
+#define MMAP_PAGE_SIZE (4096 * 16)
 
 struct kernel_interface kernel;
 
-
-
-
-
-static int kernel_action_table(const char *action, unsigned int id) {
-	char str[64];
+static bool kernel_action_table(const char *action, unsigned int id) {
+	char s[64];
 	int saved_errno;
 	int fd;
 	int i;
+	ssize_t ret;
 
 	fd = open(PREFIX "/control", O_WRONLY | O_TRUNC);
 	if (fd == -1)
-		return -1;
-	i = snprintf(str, sizeof(str), "%s %u\n", action, id);
-	if (i >= sizeof(str))
+		return false;
+	i = snprintf(s, sizeof(s), "%s %u\n", action, id);
+	if (i >= sizeof(s))
 		goto fail;
-	i = write(fd, str, strlen(str));
-	if (i == -1)
+	ret = write(fd, s, strlen(s));
+	if (ret == -1)
 		goto fail;
 	close(fd);
 
-	return 0;
+	return true;
 
 fail:
 	saved_errno = errno;
 	close(fd);
 	errno = saved_errno;
-	return -1;
+	return false;
 }
 
-static int kernel_create_table(unsigned int id) {
+static bool kernel_create_table(unsigned int id) {
 	return kernel_action_table("add", id);
 }
 
-static int kernel_delete_table(unsigned int id) {
+static bool kernel_delete_table(unsigned int id) {
 	return kernel_action_table("del", id);
 }
 
-static int kernel_open_table(unsigned int id) {
-	char str[64];
-	int saved_errno;
-	int fd;
-	struct rtpengine_message msg;
-	int i;
+static void *kernel_alloc(size_t len) {
+	void *b = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, kernel.fd, 0);
+	assert(b != NULL && b != MAP_FAILED);
+	return b;
+}
+static void kernel_free(void *p, size_t len) {
+	munmap(p, len);
+}
 
-	sprintf(str, PREFIX "/%u/control", id);
-	fd = open(str, O_RDWR | O_TRUNC);
+static int kernel_open_table(unsigned int id) {
+	char s[64];
+	int fd;
+
+	sprintf(s, PREFIX "/%u/control", id);
+	fd = open(s, O_RDWR | O_TRUNC);
 	if (fd == -1)
 		return -1;
 
-	ZERO(msg);
-	msg.cmd = REMG_NOOP;
-	i = write(fd, &msg, sizeof(msg));
-	if (i <= 0)
-		goto fail;
-
 	return fd;
-
-fail:
-	saved_errno = errno;
-	close(fd);
-	errno = saved_errno;
-	return -1;
 }
 
-int kernel_setup_table(unsigned int id) {
+bool kernel_init_table(void) {
+	if (!kernel.is_open)
+		return true;
+
+	struct rtpengine_command_init cmd;
+	ssize_t ret;
+
+	cmd.cmd = REMG_INIT;
+
+	cmd.init = (struct rtpengine_init_info) {
+		.last_cmd = __REMG_LAST,
+		.msg_size = {
+			[REMG_INIT] = sizeof(struct rtpengine_command_init),
+			[REMG_ADD_TARGET] = sizeof(struct rtpengine_command_add_target),
+			[REMG_DEL_TARGET] = sizeof(struct rtpengine_command_del_target),
+			[REMG_ADD_DESTINATION] = sizeof(struct rtpengine_command_destination),
+			[REMG_ADD_CALL] = sizeof(struct rtpengine_command_add_call),
+			[REMG_DEL_CALL] = sizeof(struct rtpengine_command_del_call),
+			[REMG_ADD_STREAM] = sizeof(struct rtpengine_command_add_stream),
+			[REMG_DEL_STREAM] = sizeof(struct rtpengine_command_del_stream),
+			[REMG_PACKET] = sizeof(struct rtpengine_command_packet),
+			[REMG_INIT_PLAY_STREAMS] = sizeof(struct rtpengine_command_init_play_streams),
+			[REMG_GET_PACKET_STREAM] = sizeof(struct rtpengine_command_get_packet_stream),
+			[REMG_PLAY_STREAM_PACKET] = sizeof(struct rtpengine_command_play_stream_packet),
+			[REMG_PLAY_STREAM] = sizeof(struct rtpengine_command_play_stream),
+			[REMG_STOP_STREAM] = sizeof(struct rtpengine_command_stop_stream),
+			[REMG_FREE_PACKET_STREAM] = sizeof(struct rtpengine_command_free_packet_stream),
+		},
+		.rtpe_stats = rtpe_stats,
+	};
+
+	ret = write(kernel.fd, &cmd, sizeof(cmd));
+	if (ret <= 0)
+		return false;
+
+	return true;
+}
+
+bool kernel_setup_table(unsigned int id) {
 	if (kernel.is_wanted)
 		abort();
 
-	kernel.is_wanted = 1;
+	kernel.is_wanted = true;
 
-	if (kernel_delete_table(id) && errno != ENOENT) {
+	if (!kernel_delete_table(id) && errno != ENOENT) {
 		ilog(LOG_ERR, "FAILED TO DELETE KERNEL TABLE %i (%s), KERNEL FORWARDING DISABLED",
 				id, strerror(errno));
-		return -1;
+		return false;
 	}
-	if (kernel_create_table(id)) {
+	if (!kernel_create_table(id)) {
 		ilog(LOG_ERR, "FAILED TO CREATE KERNEL TABLE %i (%s), KERNEL FORWARDING DISABLED",
 				id, strerror(errno));
-		return -1;
+		return false;
 	}
 	int fd = kernel_open_table(id);
 	if (fd == -1) {
 		ilog(LOG_ERR, "FAILED TO OPEN KERNEL TABLE %i (%s), KERNEL FORWARDING DISABLED",
 				id, strerror(errno));
-		return -1;
+		return false;
 	}
 
 	kernel.fd = fd;
 	kernel.table = id;
-	kernel.is_open = 1;
+	kernel.is_open = true;
 
-	return 0;
+	shm_bufferpool = bufferpool_new2(kernel_alloc, kernel_free, MMAP_PAGE_SIZE);
+
+	return true;
+}
+
+void kernel_shutdown_table(void) {
+	if (!kernel.is_open)
+		return;
+	// ignore errors
+	close(kernel.fd);
+	kernel_delete_table(kernel.table);
 }
 
 
-int kernel_add_stream(struct rtpengine_target_info *mti, int update) {
-	struct rtpengine_message msg;
-	int ret;
+void kernel_add_stream(struct rtpengine_target_info *mti) {
+	struct rtpengine_command_add_target cmd;
+	ssize_t ret;
 
 	if (!kernel.is_open)
-		return -1;
+		return;
 
-	msg.cmd = update ? REMG_UPDATE : REMG_ADD;
-	msg.u.target = *mti;
+	cmd.cmd = REMG_ADD_TARGET;
+	cmd.target = *mti;
 
-	// coverity[uninit_use_in_call : FALSE]
-	ret = write(kernel.fd, &msg, sizeof(msg));
-	if (ret > 0)
-		return 0;
+	ret = write(kernel.fd, &cmd, sizeof(cmd));
+	if (ret == sizeof(cmd))
+		return;
 
 	ilog(LOG_ERROR, "Failed to push relay stream to kernel: %s", strerror(errno));
-	return -1;
+}
+
+void kernel_add_destination(struct rtpengine_destination_info *mdi) {
+	struct rtpengine_command_destination cmd;
+	ssize_t ret;
+
+	if (!kernel.is_open)
+		return;
+
+	cmd.cmd = REMG_ADD_DESTINATION;
+	cmd.destination = *mdi;
+
+	ret = write(kernel.fd, &cmd, sizeof(cmd));
+	if (ret == sizeof(cmd))
+		return;
+
+	ilog(LOG_ERROR, "Failed to push relay stream destination to kernel: %s", strerror(errno));
 }
 
 
-int kernel_del_stream(const struct re_address *a) {
-	struct rtpengine_message msg;
-	int ret;
+bool kernel_del_stream(struct rtpengine_command_del_target *cmd) {
+	ssize_t ret;
 
 	if (!kernel.is_open)
-		return -1;
+		return false;
 
-	ZERO(msg);
-	msg.cmd = REMG_DEL;
-	msg.u.target.local = *a;
+	cmd->cmd = REMG_DEL_TARGET;
 
-	ret = write(kernel.fd, &msg, sizeof(msg));
-	if (ret > 0)
-		return 0;
+	ret = write(kernel.fd, cmd, sizeof(*cmd));
+	if (ret == sizeof(*cmd))
+		return true;
 
 	ilog(LOG_ERROR, "Failed to delete relay stream from kernel: %s", strerror(errno));
-	return -1;
-}
-
-GList *kernel_list() {
-	char str[64];
-	int fd;
-	struct rtpengine_list_entry *buf;
-	GList *li = NULL;
-	int ret;
-
-	if (!kernel.is_open)
-		return NULL;
-
-	sprintf(str, PREFIX "/%u/blist", kernel.table);
-	fd = open(str, O_RDONLY);
-	if (fd == -1)
-		return NULL;
-
-
-	for (;;) {
-		buf = g_slice_alloc(sizeof(*buf));
-		ret = read(fd, buf, sizeof(*buf));
-		if (ret != sizeof(*buf))
-			break;
-		li = g_list_prepend(li, buf);
-	}
-
-	g_slice_free1(sizeof(*buf), buf);
-	close(fd);
-
-	return li;
+	return false;
 }
 
 unsigned int kernel_add_call(const char *id) {
-	struct rtpengine_message msg;
-	int ret;
+	struct rtpengine_command_add_call cmd;
+	ssize_t ret;
 
 	if (!kernel.is_open)
 		return UNINIT_IDX;
 
-	ZERO(msg);
-	msg.cmd = REMG_ADD_CALL;
-	snprintf(msg.u.call.call_id, sizeof(msg.u.call.call_id), "%s", id);
+	cmd.cmd = REMG_ADD_CALL;
+	snprintf(cmd.call.call_id, sizeof(cmd.call.call_id), "%s", id);
 
-	ret = read(kernel.fd, &msg, sizeof(msg));
-	if (ret != sizeof(msg))
+	ret = read(kernel.fd, &cmd, sizeof(cmd));
+	if (ret != sizeof(cmd))
 		return UNINIT_IDX;
-	return msg.u.call.call_idx;
+	return cmd.call.call_idx;
 }
 
-int kernel_del_call(unsigned int idx) {
-	struct rtpengine_message msg;
-	int ret;
+void kernel_del_call(unsigned int idx) {
+	struct rtpengine_command_del_call cmd;
+	ssize_t ret;
 
 	if (!kernel.is_open)
-		return -1;
+		return;
 
-	ZERO(msg);
-	msg.cmd = REMG_DEL_CALL;
-	msg.u.call.call_idx = idx;
+	cmd.cmd = REMG_DEL_CALL;
+	cmd.call_idx = idx;
 
-	ret = write(kernel.fd, &msg, sizeof(msg));
-	if (ret != sizeof(msg))
-		return -1;
-	return 0;
+	ret = write(kernel.fd, &cmd, sizeof(cmd));
+	if (ret == sizeof(cmd))
+		return;
+
+	ilog(LOG_ERROR, "Failed to delete intercept call from kernel: %s", strerror(errno));
 }
 
 unsigned int kernel_add_intercept_stream(unsigned int call_idx, const char *id) {
-	struct rtpengine_message msg;
-	int ret;
+	struct rtpengine_command_add_stream cmd;
+	ssize_t ret;
 
 	if (!kernel.is_open)
 		return UNINIT_IDX;
 
-	ZERO(msg);
-	msg.cmd = REMG_ADD_STREAM;
-	msg.u.stream.call_idx = call_idx;
-	snprintf(msg.u.stream.stream_name, sizeof(msg.u.stream.stream_name), "%s", id);
+	cmd.cmd = REMG_ADD_STREAM;
+	cmd.stream.idx.call_idx = call_idx;
+	snprintf(cmd.stream.stream_name, sizeof(cmd.stream.stream_name), "%s", id);
 
-	ret = read(kernel.fd, &msg, sizeof(msg));
-	if (ret != sizeof(msg))
+	ret = read(kernel.fd, &cmd, sizeof(cmd));
+	if (ret != sizeof(cmd))
 		return UNINIT_IDX;
-	return msg.u.stream.stream_idx;
+	return cmd.stream.idx.stream_idx;
+}
+
+bool kernel_init_player(int num_media, int num_sessions) {
+	if (num_media <= 0 || num_sessions <= 0)
+		return false;
+	if (!kernel.is_open)
+		return false;
+
+	struct rtpengine_command_init_play_streams ips = {
+		.cmd = REMG_INIT_PLAY_STREAMS,
+		.num_packet_streams = num_media,
+		.num_play_streams = num_sessions,
+	};
+	ssize_t ret = write(kernel.fd, &ips, sizeof(ips));
+	if (ret != sizeof(ips))
+		return false;
+
+	kernel.use_player = true;
+
+	return true;
+}
+
+unsigned int kernel_get_packet_stream(void) {
+	if (!kernel.use_player)
+		return -1;
+
+	struct rtpengine_command_get_packet_stream gps = { .cmd = REMG_GET_PACKET_STREAM };
+	ssize_t ret = read(kernel.fd, &gps, sizeof(gps));
+	if (ret != sizeof(gps))
+		return -1;
+	return gps.packet_stream_idx;
+}
+
+bool kernel_add_stream_packet(unsigned int idx, const char *buf, size_t len, unsigned long delay_ms,
+		uint32_t ts, uint32_t dur)
+{
+	if (!kernel.use_player)
+		return false;
+
+	size_t total_len = len + sizeof(struct rtpengine_command_play_stream_packet);
+	struct rtpengine_command_play_stream_packet *cmd = alloca(total_len);
+
+	cmd->cmd = REMG_PLAY_STREAM_PACKET;
+	cmd->play_stream_packet.packet_stream_idx = idx;
+	cmd->play_stream_packet.delay_ms = delay_ms;
+	cmd->play_stream_packet.delay_ts = ts;
+	cmd->play_stream_packet.duration_ts = dur;
+
+	memcpy(&cmd->play_stream_packet.data, buf, len);
+
+	ssize_t ret = write(kernel.fd, cmd, total_len);
+	if (ret != total_len)
+		return false;
+	return true;
+}
+
+unsigned int kernel_start_stream_player(struct rtpengine_play_stream_info *info) {
+	if (!kernel.use_player)
+		return -1;
+
+	struct rtpengine_command_play_stream ps = {
+		.cmd = REMG_PLAY_STREAM,
+		.info = *info,
+	};
+	ssize_t ret = read(kernel.fd, &ps, sizeof(ps));
+	if (ret == sizeof(ps))
+		return ps.play_idx;
+	return -1;
+}
+
+bool kernel_stop_stream_player(unsigned int idx) {
+	if (!kernel.use_player)
+		return false;
+
+	struct rtpengine_command_stop_stream ss = {
+		.cmd = REMG_STOP_STREAM,
+		.play_idx = idx,
+	};
+	ssize_t ret = write(kernel.fd, &ss, sizeof(ss));
+	if (ret == sizeof(ss))
+		return true;
+	return false;
+}
+
+bool kernel_free_packet_stream(unsigned int idx) {
+	if (!kernel.use_player)
+		return false;
+
+	struct rtpengine_command_free_packet_stream fps = {
+		.cmd = REMG_FREE_PACKET_STREAM,
+		.packet_stream_idx = idx,
+	};
+	ssize_t ret = write(kernel.fd, &fps, sizeof(fps));
+	if (ret == sizeof(fps))
+		return true;
+	return false;
 }

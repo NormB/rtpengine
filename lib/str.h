@@ -8,23 +8,26 @@
 #include <assert.h>
 #include <stdio.h>
 #include "compat.h"
+#include "containers.h"
 
 
 
 struct _str {
 	char *s;
-	int len;
+	size_t len;
 };
 
 typedef struct _str str;
+
+TYPED_GQUEUE(str, str)
 
 
 
 #define STR_FORMAT "%.*s"
 #define STR_FORMAT_M "%s%.*s%s"
-#define STR_FMT(str) (str)->len, (str)->s
+#define STR_FMT(str) (int) (str)->len, (str)->s
 #define STR_FMT_M(str) FMT_M(STR_FMT(str))
-#define STR_FMT0(str) ((str) ? (str)->len : 6), ((str) ? (str)->s : "(NULL)")
+#define STR_FMT0(str) ((str) ? (int) (str)->len : 6), ((str) ? (str)->s : "(NULL)")
 #define STR_FMT0_M(str) FMT_M(STR_FMT0(str))
 #define G_STR_FMT(gstr) (int) (gstr)->len, (gstr)->str // for glib GString
 
@@ -33,64 +36,129 @@ typedef struct _str str;
 
 #define STR_NULL ((str) { NULL, 0 })
 #define STR_EMPTY ((str) { "", 0 })
-#define STR_CONST_INIT(str) { str, sizeof(str)-1 }
-#define STR_CONST_INIT_LEN(str, len) { str, len }
-#define STR_CONST_INIT_BUF(buf) { (char *) &buf, sizeof(buf) }
+#define STR_CONST(s) ((str) { s, sizeof(s)-1 })
+#define STR(s) ((str) { (char *) (s), (s) ? strlen(s) : 0 })
+#define STR_NC(s) ((str) { (char *) (s), strlen(s) })
+#define STR_GS(s) ((str) { (s)->str, (s)->len })
+#define STR_LEN(s, len) ((str) { (char *) (s), len })
+#define STR_LEN_ASSERT(s, len) ({ assert(sizeof(s) >= len); (str) { (char *) (s), len }; })
+#define STR_DUP(s) ({ size_t __l = strlen(s); (str) { __g_memdup(s, __l + 1), __l }; })
+#define STR_CONST_BUF(buf) ((str) { (char *) &buf, sizeof(buf) })
 
 
 
 /* returns pointer to end of str (s->s + s->len) */
+__attribute__((nonnull(1)))
+ACCESS(read_only, 1)
 INLINE char *str_end(const str *s);
 /* returns pointer to first occurrence of "c" in s */
+__attribute__((nonnull(1)))
+ACCESS(read_only, 1)
 INLINE char *str_chr(const str *s, int c);
 /* sets "out" to point to first occurrence of c in s. adjusts len also */
+__attribute__((nonnull(1, 2)))
+ACCESS(write_only, 1)
+ACCESS(read_only, 2)
 INLINE char *str_chr_str(str *out, const str *s, int c);
 /* compares a str to a regular string */
+__attribute__((nonnull(1, 2)))
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
 INLINE int str_cmp(const str *a, const char *b);
+__attribute__((nonnull(1, 2)))
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
+INLINE bool str_eq(const str *a, const char *b);
 /* compares a str to a non-null-terminated string */
-INLINE int str_cmp_len(const str *a, const char *b, int len);
+__attribute__((nonnull(1, 2)))
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
+INLINE int str_cmp_len(const str *a, const char *b, size_t len);
 /* compares two str objects */
+__attribute__((nonnull(1, 2)))
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
 INLINE int str_cmp_str(const str *a, const str *b);
+__attribute__((nonnull(1, 2)))
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
 INLINE int str_casecmp_str(const str *a, const str *b);
 /* compares two str objects, allows either to be NULL */
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
 INLINE int str_cmp_str0(const str *a, const str *b);
-/* inits a str object from a regular string. returns out */
-INLINE str *str_init(str *out, char *s);
-/* inits a str object from any binary string. returns out */
-INLINE str *str_init_len(str *out, char *s, int len);
-INLINE str *str_init_len_assert_len(str *out, char *s, int buflen, int len);
-#define str_init_len_assert(out, s, len) str_init_len_assert_len(out, s, sizeof(s), len)
+/* inits a str object from a regular string and duplicates the contents */
+ACCESS(read_only, 1)
+INLINE str str_dup_str(const str *s);
+INLINE void str_free_dup(str *out);
 /* returns new str object with uninitialized buffer large enough to hold `len` characters (+1 for null byte) */
-INLINE str *str_alloc(int len);
+INLINE str *str_alloc(size_t len);
 /* returns new str object allocated with malloc, including buffer */
+__attribute__((nonnull(1)))
+ACCESS(read_only, 1)
 INLINE str *str_dup(const str *s);
-/* returns new str object allocated from chunk, including buffer */
-INLINE str *str_chunk_insert(GStringChunk *c, const str *s);
+/* free function corresponding to str_dup() */
+__attribute__((nonnull(1)))
+ACCESS(read_write, 1)
+INLINE void str_free(str *s);
 /* shifts pointer by len chars and decrements len. returns -1 if buffer too short, 0 otherwise */
-INLINE int str_shift(str *s, int len);
+ACCESS(read_write, 1)
+INLINE int str_shift(str *s, size_t len);
+/* to revert a previously successful str_shift(). no error checking */
+__attribute__((nonnull(1)))
+ACCESS(read_write, 1)
+INLINE void str_unshift(str *s, size_t len);
 /* eats the supplied string from the beginning of s. returns -1 if string head doesn't match */
+__attribute__((nonnull(1, 2)))
+ACCESS(read_write, 1)
+ACCESS(read_only, 2)
 INLINE int str_shift_cmp(str *s, const char *);
 /* shifts the string by given length and returns the shifted part. returns -1 if string is too short */
-INLINE int str_shift_ret(str *s, int len, str *ret);
+__attribute__((nonnull(1)))
+ACCESS(read_write, 1)
+ACCESS(write_only, 3)
+INLINE int str_shift_ret(str *s, size_t len, str *ret);
 /* binary compares str object with memory chunk of equal size */
-INLINE int str_memcmp(const str *s, void *m);
+__attribute__((nonnull(1, 2)))
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
+INLINE int str_memcmp(const str *s, const void *m);
 /* locate a substring within a string, returns character index or -1 */
+__attribute__((nonnull(1, 2)))
+ACCESS(read_only, 1)
+ACCESS(read_only, 2)
 INLINE int str_str(const str *s, const char *sub);
 /* swaps the contents of two str objects */
+__attribute__((nonnull(1, 2)))
+ACCESS(read_write, 1)
+ACCESS(read_write, 2)
 INLINE void str_swap(str *a, str *b);
 /* parses a string into an int, returns default if conversion fails */
-INLINE int str_to_i(str *s, int def);
-/* parses a string uinto an int, returns default if conversion fails */
-INLINE uint str_to_ui(str *s, int def);
+__attribute__((nonnull(1)))
+ACCESS(read_only, 1)
+INLINE long long str_to_i(const str *s, long long def);
+/* parses a string into an uint, returns default if conversion fails */
+__attribute__((nonnull(1)))
+ACCESS(read_only, 1)
+INLINE unsigned long long str_to_ui(const str *s, unsigned long long def);
 /* extracts the first/next token into "new_token" and modifies "ori_and_remaidner" in place */
-INLINE int str_token(str *new_token, str *ori_and_remainder, int sep);
+__attribute__((nonnull(1, 2)))
+ACCESS(write_only, 1)
+ACCESS(read_write, 2)
+INLINE bool str_token(str *new_token, str *ori_and_remainder, int sep);
 /* same as str_token but allows for a trailing non-empty token (e.g. "foo,bar" -> "foo", "bar" ) */
-INLINE int str_token_sep(str *new_token, str *ori_and_remainder, int sep);
+__attribute__((nonnull(1, 2)))
+ACCESS(write_only, 1)
+ACCESS(read_write, 2)
+INLINE bool str_token_sep(str *new_token, str *ori_and_remainder, int sep);
 /* copy a string to a regular C string buffer, limiting the max size */
+__attribute__((nonnull(1, 3)))
+ACCESS(write_only, 1, 2)
+ACCESS(read_only, 3)
 INLINE char *str_ncpy(char *dst, size_t bufsize, const str *src);
 
 /* asprintf() analogs */
-#define str_sprintf(fmt, a...) __str_sprintf(STR_MALLOC_PADDING fmt, a)
+#define str_sprintf(fmt, ...) __str_sprintf(STR_MALLOC_PADDING fmt, ##__VA_ARGS__)
 #define str_vsprintf(fmt, a)   __str_vsprintf(STR_MALLOC_PADDING fmt, a)
 
 /* creates a new empty GString that has mem allocated for a new str object */
@@ -99,49 +167,58 @@ INLINE GString *g_string_new_str(void);
 INLINE str *g_string_free_str(GString *gs);
 
 /* for GHashTables */
-guint str_hash(gconstpointer s);
-gboolean str_equal(gconstpointer a, gconstpointer b);
-guint str_case_hash(gconstpointer s);
-gboolean str_case_equal(gconstpointer a, gconstpointer b);
+guint str_hash(const str *s);
+gboolean str_equal(const str *a, const str *b);
+guint str_case_hash(const str *s);
+gboolean str_case_equal(const str *a, const str *b);
+
+TYPED_GHASHTABLE(str_case_ht, str, str, str_case_hash, str_case_equal, free, NULL)
+TYPED_GHASHTABLE(str_case_value_ht, str, str, str_case_hash, str_case_equal, free, free)
+
 
 /* returns a new str object, duplicates the pointers but doesn't duplicate the contents */
 INLINE str *str_slice_dup(const str *);
 /* destroy function, frees a slice-alloc'd str */
-void str_slice_free(void *);
+INLINE void str_slice_free(str *);
 
 /* saves "in" into "out" pseudo-URI encoded. "out" point to a buffer with sufficient length. returns length */
-int str_uri_encode_len(char *out, const char *in, int in_len);
-INLINE int str_uri_encode(char *out, const str *in);
+str str_uri_encode_len(char *out, const char *in, size_t in_len);
 /* reverse of the above. returns newly allocated str + buffer as per str_alloc (must be free'd) */
-str *str_uri_decode_len(const char *in, int in_len);
+str *str_uri_decode_len(const char *in, size_t in_len);
 
 
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(str, str_free_dup);
 
-
-
-INLINE str *str_chunk_insert(GStringChunk *c, const str *s) {
-	str *i;
-	i = (void *) g_string_chunk_insert_len(c, (void *) s, sizeof(*s));
-	i->s = g_string_chunk_insert_len(c, s->s, s->len);
-	return i;
+typedef str_q str_slice_q;
+INLINE void str_slice_q_clear_full(str_slice_q *q) {
+	t_queue_clear_full(q, str_slice_free);
 }
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(str_slice_q, str_slice_q_clear_full)
+
+
+
+
 INLINE char *str_end(const str *s) {
 	return s->s + s->len;
 }
-INLINE int str_shift(str *s, int len) {
+INLINE int str_shift(str *s, size_t len) {
 	return str_shift_ret(s, len, NULL);
 }
-INLINE int str_shift_ret(str *s, int len, str *ret) {
+INLINE int str_shift_ret(str *s, size_t len, str *ret) {
 	if (s->len < len)
 		return -1;
 	if (ret)
-		str_init_len(ret, s->s, len);
+		*ret = STR_LEN(s->s, len);
 	s->s += len;
 	s->len -= len;
 	return 0;
 }
+INLINE void str_unshift(str *s, size_t len) {
+	s->s -= len;
+	s->len += len;
+}
 INLINE int str_shift_cmp(str *s, const char *t) {
-	int len = strlen(t);
+	size_t len = strlen(t);
 	if (s->len < len)
 		return -1;
 	if (memcmp(s->s, t, len))
@@ -151,6 +228,8 @@ INLINE int str_shift_cmp(str *s, const char *t) {
 	return 0;
 }
 INLINE char *str_chr(const str *s, int c) {
+	if (!s->len)
+		return NULL;
 	return memchr(s->s, c, s->len);
 }
 INLINE char *str_chr_str(str *out, const str *s, int c) {
@@ -164,7 +243,7 @@ INLINE char *str_chr_str(str *out, const str *s, int c) {
 	str_shift(out, p - out->s);
 	return out->s;
 }
-INLINE int str_cmp_len(const str *a, const char *b, int l) {
+INLINE int str_cmp_len(const str *a, const char *b, size_t l) {
 	if (a->len < l)
 		return -1;
 	if (a->len > l)
@@ -175,6 +254,9 @@ INLINE int str_cmp_len(const str *a, const char *b, int l) {
 }
 INLINE int str_cmp(const str *a, const char *b) {
 	return str_cmp_len(a, b, strlen(b));
+}
+INLINE bool str_eq(const str *a, const char *b) {
+	return str_cmp(a, b) == 0;
 }
 INLINE int str_cmp_str(const str *a, const str *b) {
 	if (a->len < b->len)
@@ -214,21 +296,26 @@ INLINE int str_cmp_str0(const str *a, const str *b) {
 	}
 	return str_cmp_str(a, b);
 }
-INLINE str *str_init(str *out, char *s) {
-	out->s = s;
-	out->len = s ? strlen(s) : 0;
-	return out;
+INLINE str str_dup_str(const str *s) {
+	if (!s)
+		return STR_NULL;
+	char *buf = g_malloc(s->len + 1);
+	if (s->s && s->len)
+		memcpy(buf, s->s, s->len);
+	buf[s->len] = '\0';
+	return STR_LEN(buf, s->len);
 }
-INLINE str *str_init_len(str *out, char *s, int len) {
-	out->s = s;
-	out->len = len;
-	return out;
+INLINE void str_free_dup(str *out) {
+	if (!out)
+		return;
+
+	if (out->s)
+		g_free(out->s);
+
+	out->s = NULL;
+	out->len = 0;
 }
-INLINE str *str_init_len_assert_len(str *out, char *s, int buflen, int len) {
-	assert(buflen >= len);
-	return str_init_len(out, s, len);
-}
-INLINE str *str_alloc(int len) {
+INLINE str *str_alloc(size_t len) {
 	str *r;
 	r = malloc(sizeof(*r) + len + 1);
 	r->s = ((char *) r) + sizeof(*r);
@@ -239,21 +326,29 @@ INLINE str *str_dup(const str *s) {
 	str *r;
 	r = str_alloc(s->len);
 	r->len = s->len;
-	memcpy(r->s, s->s, s->len);
+	if (s->len)
+		memcpy(r->s, s->s, s->len);
 	r->s[s->len] = '\0';
 	return r;
 }
+INLINE void str_free(str *s) {
+	free(s);
+}
 INLINE str *str_slice_dup(const str *s) {
 	str *r;
-	r = g_slice_alloc(sizeof(*r));
+	r = g_new(str, 1);
 	*r = *s;
 	return r;
+}
+INLINE void str_slice_free(str *p) {
+	g_free(p);
 }
 
 #define STR_MALLOC_PADDING "xxxxxxxxxxxxxxxx"
 INLINE str *__str_vsprintf(const char *fmt, va_list ap) {
 	char *r;
-	int l, pl;
+	int l;
+	size_t pl;
 	str *ret;
 
 	l = vasprintf(&r, fmt, ap);
@@ -269,7 +364,7 @@ INLINE str *__str_vsprintf(const char *fmt, va_list ap) {
 str *__str_sprintf(const char *fmt, ...) __attribute__((format(printf,1,2)));
 
 INLINE GString *g_string_new_str(void) {
-	int pl;
+	size_t pl;
 	GString *ret;
 
 	ret = g_string_new("");
@@ -280,18 +375,17 @@ INLINE GString *g_string_new_str(void) {
 }
 INLINE str *g_string_free_str(GString *gs) {
 	str *ret;
-	int pl;
+	size_t pl;
 
 	pl = strlen(STR_MALLOC_PADDING);
 	assert(gs->len >= pl);
 	assert(memcmp(gs->str, STR_MALLOC_PADDING, pl) == 0);
 	ret = (void *) gs->str;
-	ret->s = gs->str + pl;
 	ret->len = gs->len - pl;
-	g_string_free(gs, FALSE);
+	ret->s = g_string_free(gs, FALSE) + pl;
 	return ret;
 }
-INLINE int str_memcmp(const str *s, void *m) {
+INLINE int str_memcmp(const str *s, const void *m) {
 	return memcmp(s->s, m, s->len);
 }
 INLINE int str_str(const str *s, const char *sub) {
@@ -307,14 +401,14 @@ INLINE void str_swap(str *a, str *b) {
 	*b = t;
 }
 
-INLINE int str_to_i(str *s, int def) {
+INLINE long long str_to_i(const str *s, long long def) {
 	char c, *ep;
-	long ret;
+	long long ret;
 	if (s->len <= 0)
 		return def;
 	c = s->s[s->len];
 	s->s[s->len] = '\0';
-	ret = strtol(s->s, &ep, 10);
+	ret = strtoll(s->s, &ep, 10);
 	s->s[s->len] = c;
 	if (ep == s->s)
 		return def;
@@ -325,43 +419,46 @@ INLINE int str_to_i(str *s, int def) {
 	return ret;
 }
 
-INLINE unsigned int str_to_ui(str *s, int def) {
+INLINE unsigned long long str_to_ui(const str *s, unsigned long long def) {
 	char c, *ep;
-	long ret;
+	unsigned long long ret;
 	if (s->len <= 0)
 		return def;
 	c = s->s[s->len];
 	s->s[s->len] = '\0';
-	ret = strtol(s->s, &ep, 10);
+	ret = strtoull(s->s, &ep, 10);
 	s->s[s->len] = c;
 	if (ep == s->s)
 		return def;
 	return ret;
 }
 
-INLINE int str_token(str *new_token, str *ori_and_remainder, int sep) {
+INLINE bool str_token(str *new_token, str *ori_and_remainder, int sep) {
 	*new_token = *ori_and_remainder;
-	if (!str_chr_str(ori_and_remainder, ori_and_remainder, sep))
-		return -1;
+	if (!str_chr_str(ori_and_remainder, ori_and_remainder, sep)) {
+		*ori_and_remainder = *new_token;
+		str_shift(ori_and_remainder, ori_and_remainder->len);
+		return false;
+	}
 	new_token->len = ori_and_remainder->s - new_token->s;
 	if (str_shift(ori_and_remainder, 1))
-		return -1;
-	return 0;
+		return false;
+	return true;
 }
 
-INLINE int str_token_sep(str *new_token, str *ori_and_remainder, int sep) {
+INLINE bool str_token_sep(str *new_token, str *ori_and_remainder, int sep) {
+	if (ori_and_remainder->len == 0) {
+		*new_token = STR_NULL;
+		return false;
+	}
 	str ori = *ori_and_remainder;
-	if (!str_token(new_token, ori_and_remainder, sep))
-		return 0;
+	if (str_token(new_token, ori_and_remainder, sep))
+		return true;
 	// separator not found, use remainder as final token if not empty
 	if (!ori.len)
-		return -1;
+		return false;
 	*new_token = ori;
-	return 0;
-}
-
-INLINE int str_uri_encode(char *out, const str *in) {
-	return str_uri_encode_len(out, in->s, in->len);
+	return true;
 }
 
 INLINE char *str_ncpy(char *dst, size_t bufsize, const str *src) {

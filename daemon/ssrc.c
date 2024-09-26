@@ -1,11 +1,12 @@
 #include "ssrc.h"
+
 #include <glib.h>
-#include "aux.h"
+
+#include "helpers.h"
 #include "call.h"
 #include "rtplib.h"
 #include "codeclib.h"
-
-
+#include "bufferpool.h"
 
 static void __free_ssrc_entry_call(void *e);
 
@@ -14,9 +15,12 @@ static void init_ssrc_ctx(struct ssrc_ctx *c, struct ssrc_entry_call *parent) {
 	c->parent = parent;
 	payload_tracker_init(&c->tracker);
 	while (!c->ssrc_map_out)
-		c->ssrc_map_out = random();
+		c->ssrc_map_out = ssl_random();
+	c->seq_out = ssl_random();
+	atomic64_set_na(&c->last_sample, ssrc_timeval_to_ts(&rtpe_now));
+	c->stats = bufferpool_alloc0(shm_bufferpool, sizeof(*c->stats));
 }
-static void init_ssrc_entry(struct ssrc_entry *ent, u_int32_t ssrc) {
+static void init_ssrc_entry(struct ssrc_entry *ent, uint32_t ssrc) {
 	ent->ssrc = ssrc;
 	ent->last_used = rtpe_now.tv_sec;
 	mutex_init(&ent->lock);
@@ -26,11 +30,12 @@ static struct ssrc_entry *create_ssrc_entry_call(void *uptr) {
 	ent = obj_alloc0("ssrc_entry_call", sizeof(*ent), __free_ssrc_entry_call);
 	init_ssrc_ctx(&ent->input_ctx, ent);
 	init_ssrc_ctx(&ent->output_ctx, ent);
-	//ent->seq_out = random();
-	//ent->ts_out = random();
+	//ent->seq_out = ssl_random();
+	//ent->ts_out = ssl_random();
+	ent->lost_bits = -1;
 	return &ent->h;
 }
-static void add_ssrc_entry(u_int32_t ssrc, struct ssrc_entry *ent, struct ssrc_hash *ht) {
+static void add_ssrc_entry(uint32_t ssrc, struct ssrc_entry *ent, struct ssrc_hash *ht) {
 	init_ssrc_entry(ent, ssrc);
 	g_hash_table_replace(ht->ht, &ent->ssrc, ent);
 	obj_hold(ent); // HT entry
@@ -51,7 +56,10 @@ static void __free_ssrc_entry_call(void *ep) {
 	g_queue_clear_full(&e->sender_reports, (GDestroyNotify) free_sender_report);
 	g_queue_clear_full(&e->rr_time_reports, (GDestroyNotify) free_rr_time);
 	g_queue_clear_full(&e->stats_blocks, (GDestroyNotify) free_stats_block);
-	packet_sequencer_destroy(&e->sequencer);
+	if (e->sequencers)
+		g_hash_table_destroy(e->sequencers);
+	bufferpool_unref(e->input_ctx.stats);
+	bufferpool_unref(e->output_ctx.stats);
 }
 static void ssrc_entry_put(void *ep) {
 	struct ssrc_entry_call *e = ep;
@@ -60,24 +68,34 @@ static void ssrc_entry_put(void *ep) {
 
 // returned as mos * 10 (i.e. 10 - 50 for 1.0 to 5.0)
 static void mos_calc(struct ssrc_stats_block *ssb) {
+	uint64_t rtt = ssb->rtt;
+	if (rtpe_config.mos == MOS_CQ && !rtt)
+		return; // can not compute the MOS-CQ unless we have a valid RTT
+	else if (rtpe_config.mos == MOS_LQ)
+		rtt = 0; // ignore RTT
+
 	// as per https://www.pingman.com/kb/article/how-is-mos-calculated-in-pingplotter-pro-50.html
 	int eff_rtt = ssb->rtt / 1000 + ssb->jitter * 2 + 10;
 	double r; // XXX can this be done with int math?
 	if (eff_rtt < 160)
 		r = 93.2 - eff_rtt / 40.0;
 	else
-		r = 93.2 - (eff_rtt - 120) / 40.0;
+		r = 93.2 - (eff_rtt - 120) / 10.0;
 	r = r - (ssb->packetloss * 2.5);
-	if (r < 0)
-		r = 0;
-	double mos = 1.0 + (0.035) * r + (.000007) * r * (r-60) * (100-r);
-	int64_t intmos = mos * 10.0;
-	if (intmos < 0)
+
+	int64_t intmos;
+	if (r < 0) {
+		intmos = 10;
+	} else {
+		double mos = 1.0 + (0.035) * r + (.000007) * r * (r-60) * (100-r);
+		intmos = mos * 10.0;
+	}
+	if (intmos < 10) // must be an invalid input
 		intmos = 0;
 	ssb->mos = intmos;
 }
 
-static struct ssrc_entry *find_ssrc(u_int32_t ssrc, struct ssrc_hash *ht) {
+static void *find_ssrc(uint32_t ssrc, struct ssrc_hash *ht) {
 	rwlock_lock_r(&ht->lock);
 	struct ssrc_entry *ret = g_atomic_pointer_get(&ht->cache);
 	if (!ret || ret->ssrc != ssrc) {
@@ -107,14 +125,17 @@ static int ssrc_time_cmp(const void *aa, const void *bb, void *pp) {
 }
 
 // returns a new reference
-void *get_ssrc(u_int32_t ssrc, struct ssrc_hash *ht /* , int *created */) {
+void *get_ssrc_full(uint32_t ssrc, struct ssrc_hash *ht, bool *created) {
 	struct ssrc_entry *ent;
+
+	if (!ht)
+		return NULL;
 
 restart:
 	ent = find_ssrc(ssrc, ht);
 	if (G_LIKELY(ent)) {
-//		if (created)
-//			*created = 0;
+		if (created)
+			*created = false;
 		return ent;
 	}
 
@@ -156,15 +177,8 @@ restart:
 	add_ssrc_entry(ssrc, ent, ht);
 	g_atomic_pointer_set(&ht->cache, ent);
 	rwlock_unlock_w(&ht->lock);
-//	if (created)
-//		*created = 1;
-
-	// keep entry filled for next SSRC
-	if (g_atomic_pointer_get(&ht->precreat) == NULL) {
-		struct ssrc_entry *nextent = ht->create_func(ht->uptr);
-		if (!g_atomic_pointer_compare_and_exchange(&ht->precreat, NULL, nextent))
-			obj_put(nextent);
-	}
+	if (created)
+		*created = true;
 
 	return ent;
 }
@@ -178,15 +192,32 @@ void free_ssrc_hash(struct ssrc_hash **ht) {
 	g_slice_free1(sizeof(**ht), *ht);
 	*ht = NULL;
 }
+void ssrc_hash_foreach(struct ssrc_hash *sh, void (*f)(void *, void *), void *ptr) {
+	if (!sh)
+		return;
+
+	rwlock_lock_w(&sh->lock);
+
+	for (GList *k = sh->q.head; k; k = k->next)
+		f(k->data, ptr);
+	if (sh->precreat)
+		f(sh->precreat, ptr);
+
+	rwlock_unlock_w(&sh->lock);
+}
 
 
-struct ssrc_hash *create_ssrc_hash_full(ssrc_create_func_t cfunc, void *uptr) {
+struct ssrc_hash *create_ssrc_hash_full_fast(ssrc_create_func_t cfunc, void *uptr) {
 	struct ssrc_hash *ret;
 	ret = g_slice_alloc0(sizeof(*ret));
 	ret->ht = g_hash_table_new_full(uint32_hash, uint32_eq, NULL, ssrc_entry_put);
 	rwlock_init(&ret->lock);
 	ret->create_func = cfunc;
 	ret->uptr = uptr;
+	return ret;
+}
+struct ssrc_hash *create_ssrc_hash_full(ssrc_create_func_t cfunc, void *uptr) {
+	struct ssrc_hash *ret = create_ssrc_hash_full_fast(cfunc, uptr);
 	ret->precreat = cfunc(uptr); // because object creation might be slow
 	return ret;
 }
@@ -194,20 +225,22 @@ struct ssrc_hash *create_ssrc_hash_call(void) {
 	return create_ssrc_hash_full(create_ssrc_entry_call, NULL);
 }
 
-struct ssrc_ctx *get_ssrc_ctx(u_int32_t ssrc, struct ssrc_hash *ht, enum ssrc_dir dir) {
+struct ssrc_ctx *get_ssrc_ctx(uint32_t ssrc, struct ssrc_hash *ht, enum ssrc_dir dir, void *ref) {
 	struct ssrc_entry *s = get_ssrc(ssrc, ht /* , NULL */);
 	if (G_UNLIKELY(!s))
 		return NULL;
-	return ((void *) s) + dir;
+	struct ssrc_ctx *ret = ((void *) s) + dir;
+	if (ref)
+		ret->ref = ref;
+	return ret;
 }
 
 
 
 static void *__do_time_report_item(struct call_media *m, size_t struct_size, size_t reports_queue_offset,
-		const struct timeval *tv, u_int32_t ssrc, u_int32_t ntp_msw, u_int32_t ntp_lsw,
+		const struct timeval *tv, uint32_t ssrc, uint32_t ntp_msw, uint32_t ntp_lsw,
 		GDestroyNotify free_func, struct ssrc_entry **e_p)
 {
-	struct call *c = m->call;
 	struct ssrc_entry *e;
 	struct ssrc_time_item *sti;
 
@@ -216,7 +249,7 @@ static void *__do_time_report_item(struct call_media *m, size_t struct_size, siz
 	sti->ntp_middle_bits = ntp_msw << 16 | ntp_lsw >> 16;
 	sti->ntp_ts = ntp_ts_to_double(ntp_msw, ntp_lsw);
 
-	e = get_ssrc(ssrc, c->ssrc_hash);
+	e = get_ssrc(ssrc, m->monologue->ssrc_hash);
 	if (G_UNLIKELY(!e)) {
 		free_func(sti);
 		return NULL;
@@ -234,29 +267,56 @@ static void *__do_time_report_item(struct call_media *m, size_t struct_size, siz
 	return sti;
 }
 
-static long long __calc_rtt(struct call *c, u_int32_t ssrc, u_int32_t ntp_middle_bits,
-		u_int32_t delay, size_t reports_queue_offset, const struct timeval *tv, int *pt_p)
-{
-	if (pt_p)
-		*pt_p = -1;
+// call must be locked in R
+static struct ssrc_entry_call *hunt_ssrc(struct call_media *media, uint32_t ssrc) {
+	if (!media)
+		return NULL;
 
-	if (!ntp_middle_bits || !delay)
+	for (__auto_type sub = media->media_subscriptions.head; sub; sub = sub->next)
+	{
+		struct media_subscription * ms = sub->data;
+		struct ssrc_entry_call *e = find_ssrc(ssrc, ms->monologue->ssrc_hash);
+		if (e)
+			return e;
+	}
+
+	return NULL;
+}
+
+#define calc_rtt(m, ...) \
+	__calc_rtt(m, (struct crtt_args) {__VA_ARGS__})
+
+static long long __calc_rtt(struct call_media *m, struct crtt_args a)
+{
+	if (a.pt_p)
+		*a.pt_p = -1;
+
+	if (!a.ntp_middle_bits || !a.delay)
 		return 0;
 
-	struct ssrc_entry_call *e = get_ssrc(ssrc, c->ssrc_hash);
+	struct ssrc_entry_call *e = find_ssrc(a.ssrc, a.ht);
 	if (G_UNLIKELY(!e))
 		return 0;
 
-	if (pt_p)
-		*pt_p = e->output_ctx.tracker.most[0] == 255 ? -1 : e->output_ctx.tracker.most[0];
+	if (a.pt_p)
+		*a.pt_p = e->output_ctx.tracker.most[0] == 255 ? -1 : e->output_ctx.tracker.most[0];
+
+	// grab the opposite side SSRC for the time reports
+	uint32_t map_ssrc = e->output_ctx.ssrc_map_out;
+	if (!map_ssrc)
+		map_ssrc = e->h.ssrc;
+	obj_put(&e->h);
+	e = hunt_ssrc(m, map_ssrc);
+	if (G_UNLIKELY(!e))
+		return 0;
 
 	struct ssrc_time_item *sti;
-	GQueue *q = (((void *) e) + reports_queue_offset);
+	GQueue *q = (((void *) e) + a.reports_queue_offset);
 	mutex_lock(&e->h.lock);
 	// go through the list backwards until we find the SR referenced
 	for (GList *l = q->tail; l; l = l->prev) {
 		sti = l->data;
-		if (sti->ntp_middle_bits != ntp_middle_bits)
+		if (sti->ntp_middle_bits != a.ntp_middle_bits)
 			continue;
 		goto found;
 	}
@@ -268,12 +328,12 @@ static long long __calc_rtt(struct call *c, u_int32_t ssrc, u_int32_t ntp_middle
 
 found:;
 	// `e` remains locked for access to `sti`
-	long long rtt = timeval_diff(tv, &sti->received);
+	long long rtt = timeval_diff(a.tv, &sti->received);
 
 	mutex_unlock(&e->h.lock);
 
-	rtt -= (long long) delay * 1000000LL / 65536LL;
-	ilog(LOG_DEBUG, "Calculated round-trip time for %s%x%s is %lli us", FMT_M(ssrc), rtt);
+	rtt -= (long long) a.delay * 1000000LL / 65536LL;
+	ilog(LOG_DEBUG, "Calculated round-trip time for %s%x%s is %lli us", FMT_M(a.ssrc), rtt);
 
 	if (rtt <= 0 || rtt > 10000000) {
 		ilog(LOG_DEBUG, "Invalid RTT - discarding");
@@ -306,21 +366,25 @@ void ssrc_sender_report(struct call_media *m, const struct ssrc_sender_report *s
 	mutex_unlock(&e->lock);
 	obj_put(e);
 }
-void ssrc_receiver_report(struct call_media *m, const struct ssrc_receiver_report *rr,
+void ssrc_receiver_report(struct call_media *m, stream_fd *sfd, const struct ssrc_receiver_report *rr,
 		const struct timeval *tv)
 {
-	struct call *c = m->call;
-
 	ilog(LOG_DEBUG, "RR from %s%x%s about %s%x%s: FL %u TL %u HSR %u J %u LSR %u DLSR %u",
 			FMT_M(rr->from), FMT_M(rr->ssrc), rr->fraction_lost, rr->packets_lost,
 			rr->high_seq_received, rr->jitter, rr->lsr, rr->dlsr);
 
 	int pt;
 
-	long long rtt = __calc_rtt(c, rr->ssrc, rr->lsr, rr->dlsr,
-			G_STRUCT_OFFSET(struct ssrc_entry_call, sender_reports), tv, &pt);
+	long long rtt = calc_rtt(m,
+			.ht = m->monologue->ssrc_hash,
+			.tv = tv,
+			.pt_p = &pt,
+			.ssrc = rr->ssrc,
+			.ntp_middle_bits = rr->lsr,
+			.delay = rr->dlsr,
+			.reports_queue_offset = G_STRUCT_OFFSET(struct ssrc_entry_call, sender_reports));
 
-	struct ssrc_entry_call *other_e = get_ssrc(rr->from, c->ssrc_hash);
+	struct ssrc_entry_call *other_e = get_ssrc(rr->from, m->monologue->ssrc_hash);
 	if (G_UNLIKELY(!other_e))
 		goto out_nl;
 
@@ -330,7 +394,7 @@ void ssrc_receiver_report(struct call_media *m, const struct ssrc_receiver_repor
 		goto out_nl_put;
 	}
 
-	const struct rtp_payload_type *rpt = rtp_payload_type(pt, m->codecs_send);
+	const rtp_payload_type *rpt = get_rtp_payload_type(pt, &m->codecs);
 	if (!rpt) {
 		ilog(LOG_INFO, "Invalid RTP payload type %i, discarding RTCP RR", pt);
 		goto out_nl_put;
@@ -340,16 +404,31 @@ void ssrc_receiver_report(struct call_media *m, const struct ssrc_receiver_repor
 
 	ilog(LOG_DEBUG, "Adding opposide side RTT of %u us", other_e->last_rtt);
 
+	long long rtt_end2end = other_e->last_rtt ? (rtt + other_e->last_rtt) : 0;
+	if (other_e->last_rtt_xr > 0) { // use the RTT from RTCP-XR (in ms)
+		rtt_end2end = (long long) other_e->last_rtt_xr * 1000LL;
+	}
 	struct ssrc_stats_block *ssb = g_slice_alloc(sizeof(*ssb));
 	*ssb = (struct ssrc_stats_block) {
 		.jitter = jitter,
-		.rtt = rtt + other_e->last_rtt,
+		.rtt = rtt_end2end,
+		.rtt_leg = rtt,
 		.reported = *tv,
 		.packetloss = (unsigned int) rr->fraction_lost * 100 / 256,
 	};
 
+	RTPE_SAMPLE_SFD(jitter, jitter, sfd);
+	RTPE_SAMPLE_SFD(rtt_e2e, rtt_end2end, sfd);
+	RTPE_SAMPLE_SFD(rtt_dsct, rtt, sfd);
+	RTPE_SAMPLE_SFD(packetloss, ssb->packetloss, sfd);
+
+	other_e->packets_lost = rr->packets_lost;
 	mos_calc(ssb);
-	ilog(LOG_DEBUG, "Calculated MOS from RR for %s%x%s is %.1f", FMT_M(rr->from), (double) ssb->mos / 10.0);
+	if (ssb->mos) {
+		ilog(LOG_DEBUG, "Calculated MOS from RR for %s%x%s is %.1f", FMT_M(rr->from),
+				(double) ssb->mos / 10.0);
+		RTPE_SAMPLE_SFD(mos, ssb->mos, sfd);
+	}
 
 	// got a new stats block, add it to reporting ssrc
 	mutex_lock(&other_e->h.lock);
@@ -365,16 +444,21 @@ void ssrc_receiver_report(struct call_media *m, const struct ssrc_receiver_repor
 
 	g_queue_push_tail(&other_e->stats_blocks, ssb);
 
-	if (G_UNLIKELY(!other_e->lowest_mos) || ssb->mos < other_e->lowest_mos->mos)
+	if (ssb->mos && ((G_UNLIKELY(!other_e->lowest_mos) || ssb->mos < other_e->lowest_mos->mos)))
 		other_e->lowest_mos = ssb;
 	if (G_UNLIKELY(!other_e->highest_mos) || ssb->mos > other_e->highest_mos->mos)
 		other_e->highest_mos = ssb;
 
 	// running tally
-	other_e->average_mos.jitter += ssb->jitter;
-	other_e->average_mos.rtt += ssb->rtt;
-	other_e->average_mos.packetloss += ssb->packetloss;
-	other_e->average_mos.mos += ssb->mos;
+	if (!ssb->mos) { // when we do not have the RTT for both legs, we have no MOS
+		other_e->no_mos_count++;
+	} else {
+		other_e->average_mos.jitter += ssb->jitter;
+		other_e->average_mos.mos += ssb->mos;
+		other_e->average_mos.rtt += ssb->rtt;
+		other_e->average_mos.rtt_leg += ssb->rtt_leg;
+		other_e->average_mos.packetloss += ssb->packetloss;
+	}
 
 	goto out_ul_oe;
 
@@ -413,8 +497,14 @@ void ssrc_receiver_dlrr(struct call_media *m, const struct ssrc_xr_dlrr *dlrr,
 			FMT_M(dlrr->from), FMT_M(dlrr->ssrc),
 			dlrr->lrr, dlrr->dlrr);
 
-	__calc_rtt(m->call, dlrr->ssrc, dlrr->lrr, dlrr->dlrr,
-			G_STRUCT_OFFSET(struct ssrc_entry_call, rr_time_reports), tv, NULL);
+	calc_rtt(m,
+			.ht = m->monologue->ssrc_hash,
+			.tv = tv,
+			.pt_p = NULL,
+			.ssrc = dlrr->ssrc,
+			.ntp_middle_bits = dlrr->lrr,
+			.delay = dlrr->dlrr,
+			.reports_queue_offset = G_STRUCT_OFFSET(struct ssrc_entry_call, rr_time_reports));
 }
 
 void ssrc_voip_metrics(struct call_media *m, const struct ssrc_xr_voip_metrics *vm,
@@ -430,11 +520,10 @@ void ssrc_voip_metrics(struct call_media *m, const struct ssrc_xr_voip_metrics *
 			vm->ext_r_factor, vm->mos_lq, vm->mos_cq, vm->rx_config, vm->jb_nom,
 			vm->jb_max, vm->jb_abs_max);
 
-	struct call *c = m->call;
-	struct ssrc_entry_call *e = get_ssrc(vm->ssrc, c->ssrc_hash);
+	struct ssrc_entry_call *e = get_ssrc(vm->ssrc, m->monologue->ssrc_hash);
 	if (!e)
 		return;
-	e->last_rtt = vm->rnd_trip_delay;
+	e->last_rtt_xr = vm->rnd_trip_delay;
 	obj_put(&e->h);
 }
 
@@ -512,9 +601,7 @@ void payload_tracker_add(struct payload_tracker *t, int pt) {
 	}
 
 	// fill in new entry
-	t->last[t->last_idx++] = pt;
-	if (t->last_idx >= G_N_ELEMENTS(t->last))
-		t->last_idx = 0;
+	t->last[t->last_idx] = pt;
 
 	// increase new counter
 	PT_DBG("increasing new pt count from %u", t->count[pt]);
@@ -535,5 +622,34 @@ void payload_tracker_add(struct payload_tracker *t, int pt) {
 		__pt_sort(t, old_pt);
 
 out:
+	if (++t->last_idx >= G_N_ELEMENTS(t->last))
+		t->last_idx = 0;
 	mutex_unlock(&t->lock);
+}
+
+
+// call master lock held in R
+void ssrc_collect_metrics(struct call_media *media) {
+	if (!media->streams.head)
+		return;
+	struct packet_stream *ps = media->streams.head->data;
+	for (int i = 0; i < RTPE_NUM_SSRC_TRACKING; i++) {
+		struct ssrc_ctx *s = ps->ssrc_in[i];
+		if (!s)
+			break; // end of list
+		struct ssrc_entry_call *e = s->parent;
+
+		// exclude zero values - technically possible but unlikely and probably just unset
+		if (!e->jitter)
+			continue;
+
+		if (e->input_ctx.tracker.most_len > 0 && e->input_ctx.tracker.most[0] != 255) {
+			const rtp_payload_type *rpt = get_rtp_payload_type(e->input_ctx.tracker.most[0],
+					&ps->media->codecs);
+			if (rpt && rpt->clock_rate)
+				e->jitter = e->jitter * 1000 / rpt->clock_rate;
+		}
+
+		RTPE_SAMPLE_SFD(jitter_measured, e->jitter, ps->selected_sfd);
+	}
 }

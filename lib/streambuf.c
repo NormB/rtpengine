@@ -83,7 +83,7 @@ int streambuf_writeable(struct streambuf *b) {
 		}
 
 		if (ret != out) {
-			poller_blocked(b->poller, b->fd_ptr);
+			rtpe_poller_blocked(b->poller, b->fd_ptr);
 			break;
 		}
 	}
@@ -209,7 +209,7 @@ void streambuf_write(struct streambuf *b, const char *s, unsigned int len) {
 
 	mutex_lock(&b->lock);
 
-	while (len && !poller_isblocked(b->poller, b->fd_ptr)) {
+	while (len && !rtpe_poller_isblocked(b->poller, b->fd_ptr)) {
 		out = (len > 1024) ? 1024 : len;
 		ret = b->funcs->write(b->fd_ptr, s, out);
 
@@ -217,10 +217,10 @@ void streambuf_write(struct streambuf *b, const char *s, unsigned int len) {
 			if (errno == EINTR)
 				continue;
 			if (errno != EAGAIN && errno != EWOULDBLOCK) {
-				poller_error(b->poller, b->fd_ptr);
+				rtpe_poller_error(b->poller, b->fd_ptr);
 				break;
 			}
-			poller_blocked(b->poller, b->fd_ptr);
+			rtpe_poller_blocked(b->poller, b->fd_ptr);
 			break;
 		}
 		if (ret == 0)
@@ -232,7 +232,7 @@ void streambuf_write(struct streambuf *b, const char *s, unsigned int len) {
 	}
 
 	if (b->buf->len > 5242880)
-		poller_error(b->poller, b->fd_ptr);
+		rtpe_poller_error(b->poller, b->fd_ptr);
 	else if (len)
 		g_string_append_len(b->buf, s, len);
 

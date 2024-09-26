@@ -26,31 +26,44 @@ static void meta_free(void *ptr) {
 	metafile_t *mf = ptr;
 
 	dbg("freeing metafile info for %s%s%s", FMT_M(mf->name));
-	output_close(mf->mix_out);
 	mix_destroy(mf->mix);
+	db_close_call(mf);
 	g_string_chunk_free(mf->gsc);
+	// SSRCs first as they have linked outputs which need to be closed first
+	g_clear_pointer(&mf->ssrc_hash, g_hash_table_destroy);
 	for (int i = 0; i < mf->streams->len; i++) {
 		stream_t *stream = g_ptr_array_index(mf->streams, i);
+		if (!stream)
+			continue;
 		stream_close(stream); // should be closed already
 		stream_free(stream);
 	}
-	g_ptr_array_free(mf->streams, TRUE);
 	for (int i = 0; i < mf->tags->len; i++) {
 		tag_t *tag = g_ptr_array_index(mf->tags, i);
 		tag_free(tag);
 	}
+
+	t_hash_table_destroy(mf->metadata_parsed);
 	g_ptr_array_free(mf->tags, TRUE);
-	if (mf->ssrc_hash)
-		g_hash_table_destroy(mf->ssrc_hash);
+	g_ptr_array_free(mf->streams, TRUE);
 	g_slice_free1(sizeof(*mf), mf);
 }
 
+
+static void meta_close_ssrcs(gpointer key, gpointer value, gpointer user_data) {
+	ssrc_t *s = value;
+	pthread_mutex_lock(&s->lock);
+	ssrc_close(s);
+	pthread_mutex_unlock(&s->lock);
+}
 
 // mf is locked
 static void meta_destroy(metafile_t *mf) {
 	// close all streams
 	for (int i = 0; i < mf->streams->len; i++) {
 		stream_t *stream = g_ptr_array_index(mf->streams, i);
+		if (!stream)
+			continue;
 		pthread_mutex_lock(&stream->lock);
 		stream_close(stream);
 		pthread_mutex_unlock(&stream->lock);
@@ -63,21 +76,29 @@ static void meta_destroy(metafile_t *mf) {
 		close(mf->forward_fd);
 		mf->forward_fd = -1;
 	}
+	// shut down SSRCs, which closes TLS connections
+	if (mf->ssrc_hash) {
+		g_hash_table_foreach(mf->ssrc_hash, meta_close_ssrcs, NULL);
+		g_hash_table_destroy(mf->ssrc_hash);
+		mf->ssrc_hash = NULL;
+	}
 	db_close_call(mf);
+	output_close(mf, mf->mix_out, NULL, mf->discard);
+	mf->mix_out = NULL;
 }
 
 
 // mf is locked
 static void meta_stream_interface(metafile_t *mf, unsigned long snum, char *content) {
 	db_do_call(mf);
-	if (output_enabled && output_mixed) {
+	if (output_enabled && output_mixed && mf->recording_on) {
 		pthread_mutex_lock(&mf->mix_lock);
 		if (!mf->mix) {
-			char buf[256];
-			snprintf(buf, sizeof(buf), "%s-mix", mf->parent);
-			mf->mix_out = output_new(output_dir, buf);
+			mf->mix_out = output_new_ext(mf, "mix", "mixed", "mix");
+			if (mix_method == MM_CHANNELS)
+				mf->mix_out->channel_mult = mix_num_inputs;
 			mf->mix = mix_new();
-			db_do_stream(mf, mf->mix_out, "mixed", NULL, 0);
+			db_do_stream(mf, mf->mix_out, NULL, 0);
 		}
 		pthread_mutex_unlock(&mf->mix_lock);
 	}
@@ -89,11 +110,14 @@ static void meta_stream_interface(metafile_t *mf, unsigned long snum, char *cont
 // mf is locked
 static void meta_stream_details(metafile_t *mf, unsigned long snum, char *content) {
 	dbg("stream %lu details %s", snum, content);
-	unsigned int tag, media, tm, cmp, flags;
-	if (sscanf_match(content, "TAG %u MEDIA %u TAG-MEDIA %u COMPONENT %u FLAGS %u",
-				&tag, &media, &tm, &cmp, &flags) != 5)
+	unsigned int tag, media, tm, cmp, media_sdp_id, media_rec_slot, media_rec_slots;
+	uint64_t flags;
+	if (sscanf_match(content, "TAG %u MEDIA %u TAG-MEDIA %u COMPONENT %u FLAGS %" PRIu64 " MEDIA-SDP-ID %i MEDIA-REC-SLOT %i MEDIA-REC-SLOTS %i",
+				&tag, &media, &tm, &cmp, &flags, &media_sdp_id, &media_rec_slot, &media_rec_slots) != 8)
 		return;
-	stream_details(mf, snum, tag);
+
+	mix_set_channel_slots(mf->mix, media_rec_slots);
+	stream_details(mf, snum, tag, media_sdp_id, media_rec_slot-1);
 }
 
 
@@ -124,6 +148,23 @@ static void meta_rtp_payload_type(metafile_t *mf, unsigned long mnum, unsigned i
 
 
 // mf is locked
+static void meta_rtp_fmtp(metafile_t *mf, unsigned long mnum, unsigned int payload_num,
+		char *format)
+{
+	if (payload_num >= 128) {
+		ilog(LOG_ERR, "Payload type number %u is invalid", payload_num);
+		return;
+	}
+	if (decoding_enabled) {
+		pthread_mutex_lock(&mf->payloads_lock);
+		mf->payload_formats[payload_num] = g_string_chunk_insert(mf->gsc,
+				format);
+		pthread_mutex_unlock(&mf->payloads_lock);
+	}
+}
+
+
+// mf is locked
 static void meta_ptime(metafile_t *mf, unsigned long mnum, int ptime)
 {
 	mnum--;
@@ -132,11 +173,36 @@ static void meta_ptime(metafile_t *mf, unsigned long mnum, int ptime)
 	mf->media_ptimes[mnum] = ptime;
 }
 
+// mf is locked
+// updates the contents, does not remove previously set entries
+static void meta_metadata_parse(metafile_t *mf) {
+	// XXX offload this parsing to proxy module -> bencode list/dictionary
+	t_hash_table_remove_all(mf->metadata_parsed);
+	str all_meta = STR(mf->metadata);
+	while (all_meta.len > 1) {
+		str token;
+		if (!str_token_sep(&token, &all_meta, '|'))
+			break;
+
+		str key;
+		if (!str_token(&key, &token, ':')) {
+			// key:value separator not found, skip
+			continue;
+		}
+
+		str_q *q = t_hash_table_lookup(mf->metadata_parsed, &key);
+		if (!q) {
+			q = str_q_new();
+			t_hash_table_replace(mf->metadata_parsed, str_dup(&key), q);
+		}
+		t_queue_push_tail(q, str_dup(&token));
+	}
+}
 
 // mf is locked
 static void meta_metadata(metafile_t *mf, char *content) {
 	mf->metadata = g_string_chunk_insert(mf->gsc, content);
-	mf->metadata_db = mf->metadata;
+	meta_metadata_parse(mf);
 	db_do_call(mf);
 	if (forward_to)
 		start_forwarding_capture(mf, content);
@@ -153,18 +219,31 @@ static void meta_section(metafile_t *mf, char *section, char *content, unsigned 
 		mf->call_id = g_string_chunk_insert(mf->gsc, content);
 	else if (!strcmp(section, "PARENT"))
 		mf->parent = g_string_chunk_insert(mf->gsc, content);
+	else if (!strcmp(section, "RANDOM_TAG"))
+		mf->random_tag = g_string_chunk_insert(mf->gsc, content);
 	else if (!strcmp(section, "METADATA"))
-		meta_metadata(mf, content);
+		if (mf->forward_fd >= 0) {
+			ilog(LOG_INFO, "Connection already established, sending mid-call metadata %.*s", (int)len, content);
+			if (send(mf->forward_fd, content, len, 0) == -1) {
+				ilog(LOG_ERR, "Error sending mid-call metadata: %s.", strerror(errno));
+			}
+		} else {
+			meta_metadata(mf, content);
+		}
 	else if (sscanf_match(section, "STREAM %lu interface", &lu) == 1)
 		meta_stream_interface(mf, lu, content);
 	else if (sscanf_match(section, "STREAM %lu details", &lu) == 1)
 		meta_stream_details(mf, lu, content);
 	else if (sscanf_match(section, "MEDIA %lu PAYLOAD TYPE %u", &lu, &u) == 2)
 		meta_rtp_payload_type(mf, lu, u, content);
+	else if (sscanf_match(section, "MEDIA %lu FMTP %u", &lu, &u) == 2)
+		meta_rtp_fmtp(mf, lu, u, content);
 	else if (sscanf_match(section, "MEDIA %lu PTIME %i", &lu, &i) == 2)
 		meta_ptime(mf, lu, i);
 	else if (sscanf_match(section, "TAG %lu", &lu) == 1)
 		tag_name(mf, lu, content);
+	else if (sscanf_match(section, "METADATA-TAG %lu", &lu) == 1)
+		tag_metadata(mf, lu, content);
 	else if (sscanf_match(section, "LABEL %lu", &lu) == 1)
 		tag_label(mf, lu, content);
 	else if (sscanf_match(section, "RECORDING %u", &u) == 1)
@@ -173,6 +252,14 @@ static void meta_section(metafile_t *mf, char *section, char *content, unsigned 
 		mf->forwarding_on = u ? 1 : 0;
 	else if (sscanf_match(section, "STREAM %lu FORWARDING %u", &lu, &u) == 2)
 		stream_forwarding_on(mf, lu, u);
+	else if (!strcmp(section, "RECORDING_FILE"))
+		mf->output_dest = g_string_chunk_insert(mf->gsc, content);
+	else if (!strcmp(section, "RECORDING_PATH"))
+		mf->output_path = g_string_chunk_insert(mf->gsc, content);
+	else if (!strcmp(section, "RECORDING_PATTERN"))
+		mf->output_pattern = g_string_chunk_insert(mf->gsc, content);
+	else if (!strcmp(section, "SKIP_DATABASE"))
+		mf->skip_db = 1;
 }
 
 
@@ -184,7 +271,8 @@ static metafile_t *metafile_get(char *name) {
 	if (mf)
 		goto out;
 
-	dbg("allocating metafile info for %s%s%s", FMT_M(name));
+	ilog(LOG_INFO, "New call for recording: '%s%s%s'", FMT_M(name));
+
 	mf = g_slice_alloc0(sizeof(*mf));
 	mf->gsc = g_string_chunk_new(0);
 	mf->name = g_string_chunk_insert(mf->gsc, name);
@@ -195,6 +283,8 @@ static metafile_t *metafile_get(char *name) {
 	mf->forward_count = 0;
 	mf->forward_failed = 0;
 	mf->recording_on = 1;
+	mf->start_time = now_double();
+	mf->metadata_parsed = metadata_ht_new();
 
 	if (decoding_enabled) {
 		pthread_mutex_init(&mf->payloads_lock, NULL);
@@ -322,14 +412,28 @@ void metafile_delete(char *name) {
 	pthread_mutex_lock(&metafiles_lock);
 	metafile_t *mf = g_hash_table_lookup(metafiles, name);
 	if (!mf) {
-		// nothing to do
-		pthread_mutex_unlock(&metafiles_lock);
-		return;
+		// has it been renamed?
+		size_t len = strlen(name);
+		char *suffix = name + len - strlen(".DISCARD");
+		if (suffix > name && strcmp(suffix, ".DISCARD") == 0) {
+			*suffix = '\0';
+			mf = g_hash_table_lookup(metafiles, name);
+			if (mf)
+				mf->discard = 1;
+			*suffix = '.';
+		}
+		if (!mf) {
+			// nothing to do
+			pthread_mutex_unlock(&metafiles_lock);
+			return;
+		}
 	}
 	// switch locks and remove entry
 	pthread_mutex_lock(&mf->lock);
-	g_hash_table_remove(metafiles, name);
+	g_hash_table_remove(metafiles, mf->name);
 	pthread_mutex_unlock(&metafiles_lock);
+
+	ilog(LOG_INFO, "Recording for call '%s%s%s' finished", FMT_M(mf->name));
 
 	meta_destroy(mf);
 

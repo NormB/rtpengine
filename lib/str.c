@@ -4,7 +4,7 @@
 #include <stdarg.h>
 
 /* adapted from g_str_hash() from glib */
-guint str_hash(gconstpointer ss) {
+guint str_hash(const str *ss) {
 	const str *s = ss;
 	guint ret = 5381;
 	str it = *s;
@@ -18,11 +18,11 @@ guint str_hash(gconstpointer ss) {
 	return ret;
 }
 
-gboolean str_equal(gconstpointer a, gconstpointer b) {
+gboolean str_equal(const str *a, const str *b) {
 	return str_cmp_str((str *) a, (str *) b) == 0;
 }
 
-guint str_case_hash(gconstpointer ss) {
+guint str_case_hash(const str *ss) {
 	const str *s = ss;
 	guint ret = 5381;
 	str it = *s;
@@ -36,7 +36,7 @@ guint str_case_hash(gconstpointer ss) {
 	return ret;
 }
 
-gboolean str_case_equal(gconstpointer a, gconstpointer b) {
+gboolean str_case_equal(const str *a, const str *b) {
 	return str_casecmp_str((str *) a, (str *) b) == 0;
 }
 
@@ -47,10 +47,6 @@ str *__str_sprintf(const char *fmt, ...) {
 	ret = __str_vsprintf(fmt, ap);
 	va_end(ap);
 	return ret;
-}
-
-void str_slice_free(void *p) {
-	g_slice_free1(sizeof(str), p);
 }
 
 
@@ -69,7 +65,7 @@ char *rand_hex_str(char *rand_str, int num_bytes) {
 
 
 static const char *hex_chars = "0123456789abcdef";
-int str_uri_encode_len(char *out, const char *in, int len) {
+str str_uri_encode_len(char *out, const char *in, size_t len) {
 	const char *end = in + len;
 	char *ori_out = out;
 
@@ -86,10 +82,10 @@ int str_uri_encode_len(char *out, const char *in, int len) {
 	}
 
 	*out = 0;
-	return out - ori_out;
+	return STR_LEN(ori_out, out - ori_out);
 }
 
-str *str_uri_decode_len(const char *in, int in_len) {
+str *str_uri_decode_len(const char *in, size_t in_len) {
 	const char *end = in + in_len;
 	str *ret = str_alloc(in_len);
 	char *outp = ret->s;

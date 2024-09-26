@@ -9,7 +9,7 @@ HAVE_DPKG_PARSECHANGELOG?=$(shell which dpkg-parsechangelog 2>/dev/null)
 
 ifeq ($(RELEASE_DATE),)
   ifneq ($(HAVE_DPKG_PARSECHANGELOG),)
-    RELEASE_DATE=$(shell date -d "@$$(dpkg-parsechangelog -l$(RTPENGINE_ROOT_DIR)/debian/changelog -STimestamp)" '+%F')
+    RELEASE_DATE=$(shell date -u -d "@$$(dpkg-parsechangelog -l$(RTPENGINE_ROOT_DIR)/debian/changelog -STimestamp)" '+%F')
   endif
   ifeq ($(RELEASE_DATE),)
     RELEASE_DATE=undefined
@@ -45,20 +45,44 @@ CFLAGS+=	-DHAVE_LIBSYSTEMD
 LDLIBS+=	$(shell pkg-config --libs libsystemd)
 endif
 
+# look for liburing
+ifeq (,$(filter pkg.ngcp-rtpengine.nouring,${DEB_BUILD_PROFILES}))
+ifeq ($(shell pkg-config --atleast-version=2.3 liburing && echo yes),yes)
+have_liburing := yes
+endif
+ifeq ($(have_liburing),yes)
+CFLAGS+=	$(shell pkg-config --cflags liburing)
+CFLAGS+=	-DHAVE_LIBURING
+LDLIBS+=	$(shell pkg-config --libs liburing)
+endif
+endif
+
 ifeq ($(DBG),yes)
 CFLAGS+=	-D__DEBUG=1
-else
-CFLAGS+=	-O3
+endif
+
+# keep debugging symbols for backtrace_symbols()
+LDFLAGS += -rdynamic
+
+ifneq ($(DBG),yes)
+  ifeq (,$(filter $(CFLAGS),-O0))
+    DPKG_BLDFLGS=	$(shell which dpkg-buildflags 2>/dev/null)
+    ifneq ($(DPKG_BLDFLGS),)
+      # support http://wiki.debian.org/Hardening for >=wheezy
+      CFLAGS+=	$(shell dpkg-buildflags --get CFLAGS)
+      CPPFLAGS+=	$(shell dpkg-buildflags --get CPPFLAGS)
+      LDFLAGS+=	$(shell dpkg-buildflags --get LDFLAGS)
+      LDLIBS+=	$(shell dpkg-buildflags --get LDLIBS)
+    endif
+    CFLAGS+=-O3 -flto=auto -ffat-lto-objects
+    LDFLAGS+=-flto=auto
+  endif
 endif
 
 
-ifneq ($(DBG),yes)
-  DPKG_BLDFLGS=	$(shell which dpkg-buildflags 2>/dev/null)
-  ifneq ($(DPKG_BLDFLGS),)
-    # support http://wiki.debian.org/Hardening for >=wheezy
-    CFLAGS+=	$(shell dpkg-buildflags --get CFLAGS)
-    CPPFLAGS+=	$(shell dpkg-buildflags --get CPPFLAGS)
-    LDFLAGS+=	$(shell dpkg-buildflags --get LDFLAGS)
-    LDLIBS+=	$(shell dpkg-buildflags --get LDLIBS)
-  endif
+DATE_FMT = +%Y-%m-%d
+ifdef SOURCE_DATE_EPOCH
+    BUILD_DATE ?= $(shell date -u -d "@$(SOURCE_DATE_EPOCH)" "$(DATE_FMT)" 2>/dev/null || date -u -r "$(SOURCE_DATE_EPOCH)" "$(DATE_FMT)" 2>/dev/null || date -u "$(DATE_FMT)")
+else
+    BUILD_DATE ?= $(shell date "$(DATE_FMT)")
 endif

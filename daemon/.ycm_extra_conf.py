@@ -9,11 +9,11 @@ from clang_helpers import PrepareClangFlags
 # 'flags' list of compilation flags. Notice that YCM itself uses that approach.
 compilation_database_folder = ''
 
-repl_tmpl = '((x)[a]?((x)[b]+!):0)'
+repl_tmpl = '(int)((x)[a]?(((long)((x)[a])<<a)^!):0)'
 csh_lookup_str = '!'
 
-for num in range(30):
-    t_str = repl_tmpl.replace('a', str(num)).replace('b', str(num+1))
+for num in range(31):
+    t_str = repl_tmpl.replace('a', str(num))
     csh_lookup_str = csh_lookup_str.replace('!', t_str)
 
 csh_lookup_str = csh_lookup_str.replace('!', '0')
@@ -24,6 +24,7 @@ flags = [
     '-g',
     '-Wall',
     '-Wstrict-prototypes',
+    '-Wshadow',
     '-pthread',
     '-fno-strict-aliasing',
     '-I/usr/include/glib-2.0',
@@ -38,11 +39,15 @@ flags = [
     '-D_GNU_SOURCE',
     '-D__DEBUG=1',
     '-D__YCM=1',
+    '-DPCRE2_CODE_UNIT_WIDTH=8',
     '-DRTPENGINE_VERSION="dummy"',
     '-DRE_PLUGIN_DIR="/usr/lib/rtpengine"',
     '-DWITH_IPTABLES_OPTION',
     '-DWITH_TRANSCODING',
     '-DHAVE_BCG729',
+    '-DHAVE_MQTT',
+    '-DHAVE_CODEC_CHAIN',
+    '-DHAVE_LIBURING',
     '-D__csh_lookup(x)=str_hash(x)',
     '-DCSH_LOOKUP(x)=' + csh_lookup_str,
     '-O2',
@@ -58,7 +63,7 @@ flags = [
     # a "-std=<something>".
     # For a C project, you would set this to something like 'c99' instead of
     # 'c++11'.
-    '-std=c99',
+    '-std=c11',
     # ...and the same thing goes for the magic -x option which specifies the
     # language that the files to be compiled are written in. This is mostly
     # relevant for c++ headers.

@@ -8,11 +8,13 @@
 #include <errno.h>
 
 #include "poller.h"
-#include "aux.h"
+#include "helpers.h"
 #include "str.h"
 #include "log.h"
 #include "obj.h"
 #include "socket.h"
+#include "log_funcs.h"
+#include "uring.h"
 
 struct udp_listener_callback {
 	struct obj obj;
@@ -21,47 +23,66 @@ struct udp_listener_callback {
 	struct obj *p;
 };
 
-static void udp_listener_closed(int fd, void *p, uintptr_t x) {
-	abort();
+static void udp_listener_closed(int fd, void *p) {
+	if (!rtpe_shutdown)
+		abort();
 }
 
-static void udp_listener_incoming(int fd, void *p, uintptr_t x) {
+static void udp_listener_incoming(int fd, void *p) {
 	struct udp_listener_callback *cb = p;
 	int len;
-	char buf[0x10000];
-	char addr[64];
-	str str;
-	socket_t *listener;
-	endpoint_t sin;
-
-	str.s = buf;
-	listener = cb->ul;
+	struct udp_buffer *udp_buf = NULL;
 
 	for (;;) {
-		len = socket_recvfrom(listener, buf, sizeof(buf)-1, &sin);
+		if (!udp_buf) {
+			// initialise if we need to
+			udp_buf = obj_alloc0("udp_buffer", sizeof(*udp_buf), NULL);
+			udp_buf->str.s = udp_buf->buf + RTP_BUFFER_HEAD_ROOM;
+			udp_buf->listener = cb->ul;
+		}
+
+		len = socket_recvfrom_to(udp_buf->listener, udp_buf->str.s, MAX_UDP_LENGTH, &udp_buf->sin,
+				&udp_buf->local_addr);
 		if (len < 0) {
 			if (errno == EINTR)
 				continue;
 			if (errno != EWOULDBLOCK && errno != EAGAIN)
 				ilog(LOG_WARNING, "Error reading from UDP socket");
-			return;
+			break;
 		}
 
-		buf[len] = '\0';
-		endpoint_print(&sin, addr, sizeof(addr));
+		udp_buf->str.s[len] = '\0';
+		endpoint_print(&udp_buf->sin, udp_buf->addr, sizeof(udp_buf->addr));
 
-		str.len = len;
-		cb->func(cb->p, &str, &sin, addr, listener);
+		udp_buf->str.len = len;
+		cb->func(cb->p, udp_buf);
+
+		// we can re-use the object if only one reference (ours) is left. this is not
+		// totally race-free, but in the worst case we end up re-allocating another
+		// new object when we didn't need to.
+		if (udp_buf->obj.ref != 1) {
+			obj_put(udp_buf);
+			udp_buf = NULL;
+		}
+
+		release_closed_sockets();
+		log_info_reset();
 	}
+	obj_put(udp_buf);
 }
 
-int udp_listener_init(socket_t *sock, struct poller *p, const endpoint_t *ep,
+static void __ulc_free(void *p) {
+	struct udp_listener_callback *cb = p;
+	obj_put_o(cb->p);
+}
+
+int udp_listener_init(socket_t *sock, const endpoint_t *ep,
 		udp_listener_callback_t func, struct obj *obj)
 {
 	struct poller_item i;
 	struct udp_listener_callback *cb;
 
-	cb = obj_alloc("udp_listener_callback", sizeof(*cb), NULL);
+	cb = obj_alloc("udp_listener_callback", sizeof(*cb), __ulc_free);
 	cb->func = func;
 	cb->p = obj_get_o(obj);
 	cb->ul = sock;
@@ -69,19 +90,21 @@ int udp_listener_init(socket_t *sock, struct poller *p, const endpoint_t *ep,
 	if (open_socket(sock, SOCK_DGRAM, ep->port, &ep->address))
 		goto fail;
 
+	socket_pktinfo(sock);
+
 	ZERO(i);
 	i.fd = sock->fd;
 	i.closed = udp_listener_closed;
 	i.readable = udp_listener_incoming;
 	i.obj = &cb->obj;
-	if (poller_add_item(p, &i))
+	if (!rtpe_poller_add_item(rtpe_control_poller, &i))
 		goto fail;
 
+	obj_put(cb);
 	return 0;
 
 fail:
 	close_socket(sock);
-	obj_put_o(obj);
 	obj_put(cb);
 	return -1;
 }

@@ -7,8 +7,8 @@
 
 
 struct rtp_extension {
-	u_int16_t undefined;
-	u_int16_t length;
+	uint16_t undefined;
+	uint16_t length;
 } __attribute__ ((packed));
 
 
@@ -17,8 +17,8 @@ struct rtp_extension {
 #define RFC_TYPE_FULL(type, name, c_rate, chans, pt)			\
 	[type] = {							\
 		.payload_type		= type,				\
-		.encoding		= STR_CONST_INIT(#name),	\
-		.encoding_with_params	= STR_CONST_INIT(#name "/" #c_rate),	\
+		.encoding		= STR_CONST(#name),	\
+		.encoding_with_params	= STR_CONST(#name "/" #c_rate),	\
 		.clock_rate		= c_rate,			\
 		.channels		= chans,			\
 		.ptime			= pt,				\
@@ -106,7 +106,9 @@ error:
 }
 
 
-int rtp_padding(struct rtp_header *header, str *payload) {
+int rtp_padding(const struct rtp_header *header, str *payload) {
+	if (!header || !payload->s)
+		return 0;
 	if (!(header->v_p_x_cc & 0x20))
 		return 0; // no padding
 	if (payload->len == 0)
@@ -142,16 +144,53 @@ const struct rtp_payload_type *rtp_get_rfc_codec(const str *codec) {
 	return NULL;
 }
 
-int rtp_payload_type_cmp(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
-	if (a->payload_type != b->payload_type)
-		return 1;
+// helper function: matches only basic params, without matching payload type number
+bool rtp_payload_type_fmt_eq_nf(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
 	if (a->clock_rate != b->clock_rate)
-		return 1;
+		return false;
 	if (a->channels != b->channels)
-		return 1;
-	if (str_cmp_str(&a->encoding_with_params, &b->encoding_with_params))
-		return 1;
+		return false;
+	if (str_casecmp_str(&a->encoding, &b->encoding))
+		return false;
+	return true;
+}
+
+// matches basic params and format params, but not payload type number
+// returns matching val as per format_cmp_f
+int rtp_payload_type_fmt_cmp(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
+	if (!rtp_payload_type_fmt_eq_nf(a, b))
+		return -1;
+	if (a->codec_def && a->codec_def == b->codec_def) {
+		if (a->codec_def->format_cmp)
+			return a->codec_def->format_cmp(a, b);
+	}
+	if (!a->codec_def) // ignore format of codecs we don't know
+		return 0;
 	if (str_cmp_str(&a->format_parameters, &b->format_parameters))
-		return 1;
+		return -1;
 	return 0;
+}
+bool rtp_payload_type_fmt_eq_exact(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
+	return rtp_payload_type_fmt_cmp(a, b) == 0;
+}
+bool rtp_payload_type_fmt_eq_compat(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
+	return rtp_payload_type_fmt_cmp(a, b) >= 0;
+}
+
+bool rtp_payload_type_eq_exact(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
+	if (a->payload_type != b->payload_type)
+		return false;
+	return rtp_payload_type_fmt_cmp(a, b) == 0;
+}
+bool rtp_payload_type_eq_compat(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
+	if (a->payload_type != b->payload_type)
+		return false;
+	return rtp_payload_type_fmt_cmp(a, b) >= 0;
+}
+
+// same as rtp_payload_type_fmt_eq_nf plus matching payload type number
+bool rtp_payload_type_eq_nf(const struct rtp_payload_type *a, const struct rtp_payload_type *b) {
+	if (a->payload_type != b->payload_type)
+		return false;
+	return rtp_payload_type_fmt_eq_nf(a, b);
 }

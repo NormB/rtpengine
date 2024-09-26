@@ -1,8 +1,6 @@
 #ifndef _DTLS_H_
 #define _DTLS_H_
 
-
-
 #include <time.h>
 #include <openssl/x509.h>
 #include <openssl/ssl.h>
@@ -12,21 +10,12 @@
 #include "str.h"
 #include "obj.h"
 #include "socket.h"
-
-
-
+#include "types.h"
 
 #define DTLS_MAX_DIGEST_LEN 64
 
-
-
-
 struct packet_stream;
 struct sockaddr_in6;
-struct poller;
-struct stream_fd;
-
-
 
 struct dtls_hash_func {
 	const char *name;
@@ -36,12 +25,13 @@ struct dtls_hash_func {
 
 struct dtls_fingerprint {
 	unsigned char digest[DTLS_MAX_DIGEST_LEN];
+	unsigned int digest_len;
 	const struct dtls_hash_func *hash_func;
 };
 
 struct dtls_cert {
 	struct obj obj;
-	struct dtls_fingerprint fingerprint;
+	GQueue fingerprints;
 	EVP_PKEY *pkey;
 	X509 *x509;
 	time_t expires;
@@ -52,23 +42,25 @@ struct dtls_connection {
 	SSL *ssl;
 	BIO *r_bio, *w_bio;
 	void *ptr;
-	int init:1,
-	    active:1,
-	    connected:1;
+	unsigned char tls_id[16];
+	unsigned int init:1,
+	             active:1,
+	             connected:1;
 };
 
 
 
 
 int dtls_init(void);
-void dtls_timer(struct poller *);
+void dtls_timer(void);
 
 int dtls_verify_cert(struct packet_stream *ps);
 const struct dtls_hash_func *dtls_find_hash_func(const str *);
 struct dtls_cert *dtls_cert(void);
+void dtls_cert_free(void);
 
 int dtls_connection_init(struct dtls_connection *, struct packet_stream *, int active, struct dtls_cert *cert);
-int dtls(struct stream_fd *, const str *s, const endpoint_t *sin);
+int dtls(stream_fd *, const str *s, const endpoint_t *sin);
 void dtls_connection_cleanup(struct dtls_connection *);
 void dtls_shutdown(struct packet_stream *ps);
 
@@ -81,6 +73,7 @@ INLINE void __dtls_hash(const struct dtls_hash_func *hash_func, X509 *cert, unsi
 	unsigned int n;
 
 	assert(bufsize >= hash_func->num_bytes);
+	memset(out, 0, bufsize);
 	n = hash_func->__func(out, cert);
 	assert(n == hash_func->num_bytes);
 	(void) n;
@@ -89,6 +82,7 @@ INLINE void __dtls_hash(const struct dtls_hash_func *hash_func, X509 *cert, unsi
 
 INLINE void dtls_fingerprint_hash(struct dtls_fingerprint *fp, X509 *cert) {
 	__dtls_hash(fp->hash_func, cert, fp->digest, sizeof(fp->digest));
+	fp->digest_len = fp->hash_func->num_bytes;
 }
 
 INLINE int is_dtls(const str *s) {
@@ -112,7 +106,7 @@ INLINE int dtls_is_active(const struct dtls_connection *d) {
 }
 
 
-struct dtls_connection *dtls_ptr(struct stream_fd *sfd);
+struct dtls_connection *dtls_ptr(stream_fd *sfd);
 
 
 

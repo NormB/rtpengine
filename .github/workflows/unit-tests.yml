@@ -1,0 +1,35 @@
+name: Unit Tests
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '0 8 * * *'
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+    name: Run unit tests
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v3
+
+      - name: Update APT cache
+        run: |
+          sudo apt-get update
+
+      - name: Get build dependencies
+        run: |
+          echo "Generating Debian source for usage on Ubuntu/jammy / ubuntu-22.04"
+          cd pkg/deb/
+          ./generator.sh
+          ./backports/jammy
+          rm -rf debian
+          mv jammy debian
+          echo "Installing Debian packages"
+          sudo apt-get build-dep -q -y -Ppkg.ngcp-rtpengine.nobcg729 .
+
+      - name: Run unit tests with sanitizers enabled
+        run: |
+          make asan-check

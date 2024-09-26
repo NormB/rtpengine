@@ -1,17 +1,23 @@
 [Unit]
-Description=NGCP RtpEngine - RTP Media Proxy
-Wants=network-online.target
+Description=NGCP RTP/media Proxy Daemon
 After=network-online.target
 
 [Service]
 Type=forking
-User=ngcp-rtpengine
-Group=daemon
-Environment=CFGFILE=/etc/rtpengine/rtpengine.conf
+Environment=CFG_FILE=/etc/rtpengine/rtpengine.conf
 EnvironmentFile=/etc/sysconfig/rtpengine
-PIDFile=/run/rtpengine.pid
-ExecStart=/usr/sbin/rtpengine --config-file=${CFGFILE} --interface=${INTERFACE} --listen-ng=${LISTEN_UDP} --log-facility=${LOG_FACILITY} --log-level=${LOG_LEVEL}
+User=ngcp-rtpengine
+Group=ngcp-rtpengine
+AmbientCapabilities=CAP_NET_ADMIN CAP_SYS_NICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_SYS_NICE
+LimitNOFILE=150000
+RuntimeDirectory=rtpengine
+PIDFile=/run/rtpengine/rtpengine.pid
+ExecStart=/usr/bin/rtpengine --config-file=${CFG_FILE} --pidfile=${PID_FILE}
+RestartSec=3s
+TimeoutSec=15s
 Restart=on-failure
 
 [Install]
 WantedBy=multi-user.target
+Alias=ngcp-rtpengine.service

@@ -1,12 +1,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <inttypes.h>
+#include <stdbool.h>
 #include <endian.h>
 #include <spandsp/telephony.h>
 #include <spandsp/super_tone_rx.h>
 #include <spandsp/logging.h>
 #include <spandsp/dtmf.h>
 #include <glib.h>
+#include <string.h>
 
 static unsigned char samples[] = {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
@@ -644,6 +646,9 @@ int main(int argc, char **argv) {
 				"code 56 level -4 delay 510, "
 				"code 0 level -99 delay 816, "))
 		abort();
+
+	g_string_free(output, TRUE);
+	dtmf_rx_free(dtmf_dsp);
 
 	return 0;
 }

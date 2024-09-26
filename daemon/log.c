@@ -1,8 +1,10 @@
 #include "log.h"
+
 #include <syslog.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <glib.h>
+
 #include "str.h"
 #include "call.h"
 #include "poller.h"
@@ -10,10 +12,8 @@
 #include "loglib.h"
 #include "main.h"
 
-
-
-
-struct log_info __thread log_info;
+__thread struct log_info log_info;
+__thread GSList *log_info_stack;
 
 int _log_facility_cdr = 0;
 int _log_facility_rtcp = 0;
@@ -40,27 +40,45 @@ static void ilog_prefix_default(char *prefix, size_t prefix_len) {
 			break;
 		case LOG_INFO_CALL:
 			snprintf(prefix, prefix_len, "[" STR_FORMAT_M "]: ",
-					STR_FMT_M(&log_info.u.call->callid));
+					STR_FMT_M(&log_info.call->callid));
 			break;
 		case LOG_INFO_STREAM_FD:
-			if (log_info.u.stream_fd->call)
-				snprintf(prefix, prefix_len, "[" STR_FORMAT_M " port %5u]: ",
-						STR_FMT_M(&log_info.u.stream_fd->call->callid),
-						log_info.u.stream_fd->socket.local.port);
+			if (log_info.stream_fd->call) {
+				if (log_info.stream_fd->stream)
+					snprintf(prefix, prefix_len, "[" STR_FORMAT_M "/" STR_FORMAT_M "/%u port %5u]: ",
+							STR_FMT_M(&log_info.stream_fd->call->callid),
+							STR_FMT_M(&log_info.stream_fd->stream->media->monologue->tag),
+							log_info.stream_fd->stream->media->index,
+							log_info.stream_fd->socket.local.port);
+				else
+					snprintf(prefix, prefix_len, "[" STR_FORMAT_M " port %5u]: ",
+							STR_FMT_M(&log_info.stream_fd->call->callid),
+							log_info.stream_fd->socket.local.port);
+			}
+			else
+				snprintf(prefix, prefix_len, "[no call, port %5u]: ",
+						log_info.stream_fd->socket.local.port);
+
 			break;
 		case LOG_INFO_STR:
 			snprintf(prefix, prefix_len, "[" STR_FORMAT_M "]: ",
-					STR_FMT_M(log_info.u.str));
+					STR_FMT_M(log_info.str));
 			break;
 		case LOG_INFO_C_STRING:
 			snprintf(prefix, prefix_len, "[%s%s%s]: ",
-					FMT_M(log_info.u.cstr));
+					FMT_M(log_info.cstr));
 			break;
 		case LOG_INFO_ICE_AGENT:
 			snprintf(prefix, prefix_len, "[" STR_FORMAT_M "/" STR_FORMAT_M "/%u]: ",
-					STR_FMT_M(&log_info.u.ice_agent->call->callid),
-					STR_FMT_M(&log_info.u.ice_agent->media->monologue->tag),
-					log_info.u.ice_agent->media->index);
+					STR_FMT_M(&log_info.ice_agent->call->callid),
+					STR_FMT_M(&log_info.ice_agent->media->monologue->tag),
+					log_info.ice_agent->media->index);
+			break;
+		case LOG_INFO_MEDIA:
+			snprintf(prefix, prefix_len, "[" STR_FORMAT_M "/" STR_FORMAT_M "/%u]: ",
+					STR_FMT_M(&log_info.call->callid),
+					STR_FMT_M(&log_info.media->monologue->tag),
+					log_info.media->index);
 			break;
 	}
 }
@@ -72,26 +90,40 @@ static void ilog_prefix_parsable(char *prefix, size_t prefix_len) {
 			break;
 		case LOG_INFO_CALL:
 			snprintf(prefix, prefix_len, "[ID=\""STR_FORMAT"\"]: ",
-					STR_FMT(&log_info.u.call->callid));
+					STR_FMT(&log_info.call->callid));
 			break;
 		case LOG_INFO_STREAM_FD:
-			if (log_info.u.stream_fd->call)
-				snprintf(prefix, prefix_len, "[ID=\""STR_FORMAT"\" port=\"%5u\"]: ",
-						STR_FMT(&log_info.u.stream_fd->call->callid),
-						log_info.u.stream_fd->socket.local.port);
+			if (log_info.stream_fd->call) {
+				if (log_info.stream_fd->stream)
+					snprintf(prefix, prefix_len, "[ID=\""STR_FORMAT"\" tag=\""STR_FORMAT"\" index=\"%u\" port=\"%5u\"]: ",
+							STR_FMT(&log_info.stream_fd->call->callid),
+							STR_FMT(&log_info.stream_fd->stream->media->monologue->tag),
+							log_info.stream_fd->stream->media->index,
+							log_info.stream_fd->socket.local.port);
+				else
+					snprintf(prefix, prefix_len, "[ID=\""STR_FORMAT"\" port=\"%5u\"]: ",
+							STR_FMT(&log_info.stream_fd->call->callid),
+							log_info.stream_fd->socket.local.port);
+			}
 			break;
 		case LOG_INFO_STR:
 			snprintf(prefix, prefix_len, "[ID=\""STR_FORMAT"\"]: ",
-					STR_FMT(log_info.u.str));
+					STR_FMT(log_info.str));
 			break;
 		case LOG_INFO_C_STRING:
-			snprintf(prefix, prefix_len, "[ID=\"%s\"]: ", log_info.u.cstr);
+			snprintf(prefix, prefix_len, "[ID=\"%s\"]: ", log_info.cstr);
 			break;
 		case LOG_INFO_ICE_AGENT:
 			snprintf(prefix, prefix_len, "[ID=\""STR_FORMAT"\" tag=\""STR_FORMAT"\" index=\"%u\"]: ",
-					STR_FMT(&log_info.u.ice_agent->call->callid),
-					STR_FMT(&log_info.u.ice_agent->media->monologue->tag),
-					log_info.u.ice_agent->media->index);
+					STR_FMT(&log_info.ice_agent->call->callid),
+					STR_FMT(&log_info.ice_agent->media->monologue->tag),
+					log_info.ice_agent->media->index);
+			break;
+		case LOG_INFO_MEDIA:
+			snprintf(prefix, prefix_len, "[ID=\""STR_FORMAT"\" tag=\""STR_FORMAT"\" index=\"%u\"]: ",
+					STR_FMT(&log_info.call->callid),
+					STR_FMT(&log_info.media->monologue->tag),
+					log_info.media->index);
 			break;
 	}
 }
@@ -130,4 +162,30 @@ void dtmflog(GString *s) {
 
 void rtcplog(const char* cdrbuffer) {
     syslog(LOG_INFO | _log_facility_rtcp, "%s", cdrbuffer);
+}
+
+int get_local_log_level(unsigned int subsystem_idx) {
+	call_t *call = NULL;
+
+	switch (log_info.e) {
+		case LOG_INFO_CALL:
+		case LOG_INFO_MEDIA:
+			call = log_info.call;
+			break;
+		case LOG_INFO_STREAM_FD:
+			call = log_info.stream_fd->call;
+			break;
+		case LOG_INFO_ICE_AGENT:
+			call = log_info.ice_agent->call;
+			break;
+		default:
+			break;
+	}
+	if (!call)
+		return -1;
+	if (CALL_ISSET(call, FOREIGN))
+		return 5 | LOG_FLAG_MAX;
+	if (CALL_ISSET(call, DEBUG))
+		return 8;
+	return -1;
 }

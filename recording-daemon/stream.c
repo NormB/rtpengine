@@ -11,6 +11,7 @@
 #include "main.h"
 #include "packet.h"
 #include "forward.h"
+#include "recaux.h"
 
 
 #define MAXBUFLEN 65535
@@ -46,47 +47,47 @@ static void stream_handler(handler_t *handler) {
 
 	//dbg("poll event for %s", stream->name);
 
-	pthread_mutex_lock(&stream->lock);
+	while (true) {
+		pthread_mutex_lock(&stream->lock);
 
-	if (stream->fd == -1)
-		goto out;
+		if (stream->fd == -1)
+			break;
 
-	buf = malloc(ALLOCLEN);
-	int ret = read(stream->fd, buf, MAXBUFLEN);
-	if (ret == 0) {
-		ilog(LOG_INFO, "EOF on stream %s", stream->name);
-		stream_close(stream);
-		goto out;
-	}
-	else if (ret < 0) {
-		if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK)
-			goto out;
-		ilog(LOG_INFO, "Read error on stream %s: %s", stream->name, strerror(errno));
-		stream_close(stream);
-		goto out;
-	}
+		buf = malloc(ALLOCLEN);
+		int ret = read(stream->fd, buf, MAXBUFLEN);
+		if (ret == 0) {
+			ilog(LOG_INFO, "EOF on stream %s", stream->name);
+			stream_close(stream);
+			break;
+		}
+		else if (ret < 0) {
+			if (errno == EAGAIN || errno == EINTR || errno == EWOULDBLOCK)
+				break;
+			ilog(LOG_INFO, "Read error on stream %s: %s", stream->name, strerror(errno));
+			stream_close(stream);
+			break;
+		}
 
-	// got a packet
-	pthread_mutex_unlock(&stream->lock);
+		// got a packet
+		pthread_mutex_unlock(&stream->lock);
 
-	if (forward_to){
-		if (forward_packet(stream->metafile,buf,ret)) // leaves buf intact
-			g_atomic_int_inc(&stream->metafile->forward_failed);
+		if (forward_to){
+			if (forward_packet(stream->metafile,buf,ret)) // leaves buf intact
+				g_atomic_int_inc(&stream->metafile->forward_failed);
+			else
+				g_atomic_int_inc(&stream->metafile->forward_count);
+		}
+		if (decoding_enabled)
+			packet_process(stream, buf, ret); // consumes buf
 		else
-			g_atomic_int_inc(&stream->metafile->forward_count);
+			free(buf);
+
+		buf = NULL;
 	}
-	if (decoding_enabled)
-		packet_process(stream, buf, ret); // consumes buf
-	else
-		free(buf);
 
-	log_info_call = NULL;
-	log_info_stream = NULL;
-	return;
-
-out:
 	pthread_mutex_unlock(&stream->lock);
-	free(buf);
+	if (buf)
+		free(buf);
 	log_info_call = NULL;
 	log_info_stream = NULL;
 }
@@ -107,6 +108,7 @@ static stream_t *stream_get(metafile_t *mf, unsigned long id) {
 	ret->id = id;
 	ret->metafile = mf;
 	ret->tag = (unsigned long) -1;
+	ret->start_time = now_double();
 
 out:
 	return ret;
@@ -136,9 +138,14 @@ void stream_open(metafile_t *mf, unsigned long id, char *name) {
 	epoll_add(stream->fd, EPOLLIN, &stream->handler);
 }
 
-void stream_details(metafile_t *mf, unsigned long id, unsigned int tag) {
+void stream_details(metafile_t *mf, unsigned long id, unsigned int tag, unsigned int media_sdp_id, unsigned int channel_slot) {
 	stream_t *stream = stream_get(mf, id);
 	stream->tag = tag;
+	stream->media_sdp_id = media_sdp_id;
+	if(channel_slot > mix_num_inputs) {
+		ilog(LOG_ERR, "Channel slot %u is greater than the maximum number of inputs %u, setting to %u", channel_slot, mix_num_inputs, mix_num_inputs);
+	}
+	stream->channel_slot = channel_slot > mix_num_inputs ? mix_num_inputs : channel_slot;
 }
 
 void stream_forwarding_on(metafile_t *mf, unsigned long id, unsigned int on) {

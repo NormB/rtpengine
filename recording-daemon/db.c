@@ -1,4 +1,5 @@
 #include "db.h"
+#include <errno.h>
 #include <mysql.h>
 #include <glib.h>
 #include <string.h>
@@ -7,6 +8,7 @@
 #include "main.h"
 #include "log.h"
 #include "tag.h"
+#include "recaux.h"
 
 
 /*
@@ -52,12 +54,14 @@ CREATE TABLE `recording_metakeys` (
 
 
 
-static MYSQL __thread *mysql_conn;
-static MYSQL_STMT __thread
+static __thread MYSQL *mysql_conn;
+static __thread MYSQL_STMT
 	*stm_insert_call,
 	*stm_close_call,
+	*stm_delete_call,
 	*stm_insert_stream,
 	*stm_close_stream,
+	*stm_delete_stream,
 	*stm_config_stream,
 	*stm_insert_metadata;
 
@@ -73,8 +77,10 @@ static void my_stmt_close(MYSQL_STMT **st) {
 static void reset_conn(void) {
 	my_stmt_close(&stm_insert_call);
 	my_stmt_close(&stm_close_call);
+	my_stmt_close(&stm_delete_call);
 	my_stmt_close(&stm_insert_stream);
 	my_stmt_close(&stm_close_stream);
+	my_stmt_close(&stm_delete_stream);
 	my_stmt_close(&stm_config_stream);
 	my_stmt_close(&stm_insert_metadata);
 	mysql_close(mysql_conn);
@@ -82,12 +88,12 @@ static void reset_conn(void) {
 }
 
 
-INLINE int prep(MYSQL_STMT **st, const char *str) {
+INLINE int prep(MYSQL_STMT **st, const char *s) {
 	*st = mysql_stmt_init(mysql_conn);
 	if (!*st)
 		return -1;
-	if (mysql_stmt_prepare(*st, str, strlen(str))) {
-		ilog(LOG_ERR, "Failed to prepare statement '%s': %s", str, mysql_stmt_error(*st));
+	if (mysql_stmt_prepare(*st, s, strlen(s))) {
+		ilog(LOG_ERR, "Failed to prepare statement '%s': %s", s, mysql_stmt_error(*st));
 		return -1;
 	}
 	return 0;
@@ -127,7 +133,10 @@ static int check_conn(void) {
 				"(?,concat(?,'.',?),concat(?,'.',?),?,?,?,?,?,?)"))
 		goto err;
 	if (prep(&stm_close_call, "update recording_calls set " \
-				"end_timestamp = ?, status = 'completed' where id = ?"))
+				"end_timestamp = ?, status = 'completed' where id = ? " \
+				"and status != 'completed'"))
+		goto err;
+	if (prep(&stm_delete_call, "delete from recording_calls where id = ?"))
 		goto err;
 	if ((output_storage & OUTPUT_STORAGE_DB)) {
 		if (prep(&stm_close_stream, "update recording_streams set " \
@@ -139,6 +148,8 @@ static int check_conn(void) {
 					"end_timestamp = ? where id = ?"))
 			goto err;
 	}
+	if (prep(&stm_delete_stream, "delete from recording_streams where id = ?"))
+		goto err;
 	if (prep(&stm_config_stream, "update recording_streams set channels = ?, sample_rate = ? where id = ?"))
 		goto err;
 	if (prep(&stm_insert_metadata, "insert into recording_metakeys (`call`, `key`, `value`) values " \
@@ -239,56 +250,45 @@ err:
 }
 
 
-static double now_double(void) {
-	struct timeval tv;
-	gettimeofday(&tv, NULL);
-	return tv.tv_sec + tv.tv_usec / 1000000.0;
-}
-
 static void db_do_call_id(metafile_t *mf) {
 	if (mf->db_id > 0)
 		return;
 	if (!mf->call_id)
 		return;
-
-	double now = now_double();
+	if (mf->skip_db)
+		return;
 
 	MYSQL_BIND b[2];
 	my_cstr(&b[0], mf->call_id);
-	my_d(&b[1], &now);
+	my_d(&b[1], &mf->start_time);
 
 	execute_wrap(&stm_insert_call, b, &mf->db_id);
 }
 static void db_do_call_metadata(metafile_t *mf) {
-	if (!mf->metadata_db)
+	if (mf->db_metadata_done)
 		return;
 	if (mf->db_id == 0)
+		return;
+	if (mf->skip_db)
 		return;
 
 	MYSQL_BIND b[3];
 	my_ull(&b[0], &mf->db_id); // stays persistent
 
-	// XXX offload this parsing to proxy module -> bencode list/dictionary
-	str all_meta;
-	str_init(&all_meta, mf->metadata_db);
-	while (all_meta.len > 1) {
-		str token;
-		if (str_token_sep(&token, &all_meta, '|'))
-			break;
+	metadata_ht_iter iter;
+	t_hash_table_iter_init(&iter, mf->metadata_parsed);
+	str *key;
+	str_q *vals;
+	while (t_hash_table_iter_next(&iter, &key, &vals)) {
+		for (__auto_type l = vals->head; l; l = l->next) {
+			my_str(&b[1], key);
+			my_str(&b[2], l->data);
 
-		str key;
-		if (str_token(&key, &token, ':')) {
-			// key:value separator not found, skip
-			continue;
+			execute_wrap(&stm_insert_metadata, b, NULL);
 		}
-
-		my_str(&b[1], &key);
-		my_str(&b[2], &token);
-
-		execute_wrap(&stm_insert_metadata, b, NULL);
 	}
 
-	mf->metadata_db = NULL;
+	mf->db_metadata_done = 1;
 }
 
 void db_do_call(metafile_t *mf) {
@@ -301,16 +301,17 @@ void db_do_call(metafile_t *mf) {
 
 
 // mf is locked
-void db_do_stream(metafile_t *mf, output_t *op, const char *type, stream_t *stream, unsigned long ssrc) {
+void db_do_stream(metafile_t *mf, output_t *op, stream_t *stream, unsigned long ssrc) {
 	if (check_conn())
 		return;
 	if (mf->db_id == 0)
 		return;
 	if (op->db_id > 0)
 		return;
+	if (mf->skip_db)
+		return;
 
 	unsigned long id = stream ? stream->id : 0;
-	double now = now_double();
 
 	MYSQL_BIND b[11];
 	my_ull(&b[0], &mf->db_id);
@@ -319,7 +320,7 @@ void db_do_stream(metafile_t *mf, output_t *op, const char *type, stream_t *stre
 	my_cstr(&b[3], op->full_filename);
 	my_cstr(&b[4], op->file_format);
 	my_cstr(&b[5], op->file_format);
-	my_cstr(&b[6], type);
+	my_cstr(&b[6], op->kind);
 	b[7] = (MYSQL_BIND) {
 		.buffer_type = MYSQL_TYPE_LONG,
 		.buffer = &id,
@@ -338,9 +339,12 @@ void db_do_stream(metafile_t *mf, output_t *op, const char *type, stream_t *stre
 	}
 	else
 		my_cstr(&b[9], "");
-	my_d(&b[10], &now);
+	my_d(&b[10], &op->start_time);
 
 	execute_wrap(&stm_insert_stream, b, &op->db_id);
+
+	if (op->db_id > 0)
+		mf->db_streams++;
 }
 
 void db_close_call(metafile_t *mf) {
@@ -352,10 +356,17 @@ void db_close_call(metafile_t *mf) {
 	double now = now_double();
 
 	MYSQL_BIND b[2];
-	my_d(&b[0], &now);
-	my_ull(&b[1], &mf->db_id);
 
-	execute_wrap(&stm_close_call, b, NULL);
+	if (mf->db_streams > 0) {
+		my_d(&b[0], &now);
+		my_ull(&b[1], &mf->db_id);
+		execute_wrap(&stm_close_call, b, NULL);
+	}
+	else {
+		my_ull(&b[0], &mf->db_id);
+		execute_wrap(&stm_delete_call, b, NULL);
+		mf->db_id = 0;
+	}
 }
 
 void db_close_stream(output_t *op) {
@@ -367,42 +378,39 @@ void db_close_stream(output_t *op) {
 	double now = now_double();
 
 	str stream;
-        char *filename = 0;
         MYSQL_BIND b[3];
         stream.s = 0;
         stream.len = 0;
 
 	if ((output_storage & OUTPUT_STORAGE_DB)) {
-		filename = malloc(strlen(op->full_filename) +
-				  strlen(op->file_format) + 2);
-		if (!filename) {
-			ilog(LOG_ERR, "Failed to allocate memory for filename");
-			if ((output_storage & OUTPUT_STORAGE_FILE))
-				goto file;
-			return;
-		}
-		strcpy(filename, op->full_filename);
-		strcat(filename, ".");
-		strcat(filename, op->file_format);
-		FILE *f = fopen(filename, "rb");
+		FILE *f = fopen(op->filename, "rb");
 		if (!f) {
-			ilog(LOG_ERR, "Failed to open file: %s%s%s", FMT_M(filename));
+			ilog(LOG_ERR, "Failed to open file: %s%s%s", FMT_M(op->filename));
 			if ((output_storage & OUTPUT_STORAGE_FILE))
 				goto file;
-			free(filename);
 			return;
 		}
 		fseek(f, 0, SEEK_END);
-		stream.len = ftell(f);
+		long pos = ftell(f);
+		if (pos < 0) {
+			ilog(LOG_ERR, "Failed to get file position: %s", strerror(errno));
+			fclose(f);
+			if ((output_storage & OUTPUT_STORAGE_FILE))
+				goto file;
+			return;
+		}
+		stream.len = pos;
 		fseek(f, 0, SEEK_SET);
 		stream.s = malloc(stream.len);
 		if (stream.s) {
 			size_t count = fread(stream.s, 1, stream.len, f);
 			if (count != stream.len) {
+				stream.len = 0;
 				ilog(LOG_ERR, "Failed to read from stream");
+				fclose(f);
 				if ((output_storage & OUTPUT_STORAGE_FILE))
 					goto file;
-				free(filename);
+				free(stream.s);
 				return;
 			}
 		}
@@ -421,8 +429,22 @@ file:;
         if (stream.s)
 		free(stream.s);
 	if (!(output_storage & OUTPUT_STORAGE_FILE))
-		remove(filename);
-        free(filename);
+		if (unlink(op->filename))
+			ilog(LOG_ERR, "Failed to delete file '%s': %s", op->filename, strerror(errno));
+}
+
+void db_delete_stream(metafile_t *mf, output_t *op) {
+	if (check_conn())
+		return;
+	if (op->db_id == 0)
+		return;
+
+        MYSQL_BIND b[1];
+	my_ull(&b[0], &op->db_id);
+
+	execute_wrap(&stm_delete_stream, b, NULL);
+
+	mf->db_streams--;
 }
 
 void db_config_stream(output_t *op) {
@@ -437,4 +459,8 @@ void db_config_stream(output_t *op) {
 	my_ull(&b[2], &op->db_id);
 
 	execute_wrap(&stm_config_stream, b, NULL);
+}
+
+void db_thread_end(void) {
+	reset_conn();
 }

@@ -1,27 +1,27 @@
 #include "bencode.h"
+
 #include <stdio.h>
 #include <sys/uio.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
+#include <ctype.h>
 
+#include "helpers.h"
 
 /* set to 0 for alloc debugging, e.g. through valgrind */
 #define BENCODE_MIN_BUFFER_PIECE_LEN	512
 
 #define BENCODE_HASH_BUCKETS		31 /* prime numbers work best */
 
+#define BENCODE_ALLOC_ALIGN		8
+
 struct __bencode_buffer_piece {
 	char *tail;
 	unsigned int left;
 	struct __bencode_buffer_piece *next;
 	char buf[0];
-};
-struct __bencode_free_list {
-	void *ptr;
-	free_func_t func;
-	struct __bencode_free_list *next;
 };
 struct __bencode_hash {
 	struct bencode_item *buckets[BENCODE_HASH_BUCKETS];
@@ -33,8 +33,12 @@ struct __bencode_hash {
 
 static bencode_item_t __bencode_end_marker = {
 	.type = BENCODE_END_MARKER,
-	.iov[0].iov_base = "e",
-	.iov[0].iov_len = 1,
+	.iov = {
+		{
+			.iov_base = "e",
+			.iov_len = 1,
+		},
+	},
 	.iov_cnt = 1,
 	.str_len = 1,
 };
@@ -76,7 +80,7 @@ static struct __bencode_buffer_piece *__bencode_piece_new(unsigned int size) {
 
 	if (size < BENCODE_MIN_BUFFER_PIECE_LEN)
 		size = BENCODE_MIN_BUFFER_PIECE_LEN;
-	ret = BENCODE_MALLOC(sizeof(*ret) + size);
+	ret = BENCODE_MALLOC(sizeof(*ret) + size + BENCODE_ALLOC_ALIGN);
 	if (!ret)
 		return NULL;
 
@@ -91,7 +95,6 @@ int bencode_buffer_init(bencode_buffer_t *buf) {
 	buf->pieces = __bencode_piece_new(0);
 	if (!buf->pieces)
 		return -1;
-	buf->free_list = NULL;
 	buf->error = 0;
 	return 0;
 }
@@ -99,6 +102,7 @@ int bencode_buffer_init(bencode_buffer_t *buf) {
 void *bencode_buffer_alloc(bencode_buffer_t *buf, unsigned int size) {
 	struct __bencode_buffer_piece *piece;
 	void *ret;
+	unsigned int align_size = ((size + BENCODE_ALLOC_ALIGN - 1) / BENCODE_ALLOC_ALIGN) * BENCODE_ALLOC_ALIGN;
 
 	if (!buf)
 		return NULL;
@@ -121,18 +125,20 @@ void *bencode_buffer_alloc(bencode_buffer_t *buf, unsigned int size) {
 	assert(size <= piece->left);
 
 alloc:
-	piece->left -= size;
+	if (piece->left >= align_size)
+		piece->left -= align_size;
+	else
+		piece->left = 0;
 	ret = piece->tail;
-	piece->tail += size;
+	piece->tail += align_size;
 	return ret;
 }
 
 void bencode_buffer_free(bencode_buffer_t *buf) {
-	struct __bencode_free_list *fl;
 	struct __bencode_buffer_piece *piece, *next;
 
-	for (fl = buf->free_list; fl; fl = fl->next)
-		fl->func(fl->ptr);
+	if (!buf)
+		return;
 
 	for (piece = buf->pieces; piece; piece = next) {
 		next = piece->next;
@@ -195,16 +201,16 @@ static void __bencode_container_add(bencode_item_t *parent, bencode_item_t *chil
 }
 
 static bencode_item_t *__bencode_string_alloc(bencode_buffer_t *buf, const void *base,
-		int str_len, int iov_len, int iov_cnt, bencode_type_t type)
+		size_t str_len, size_t iov_len, unsigned int iov_cnt, bencode_type_t type)
 {
 	bencode_item_t *ret;
 	int len_len;
 
-	assert((str_len <= 99999) && (str_len >= 0));
+	assert(str_len <= 99999);
 	ret = __bencode_item_alloc(buf, 7);
 	if (!ret)
 		return NULL;
-	len_len = sprintf(ret->__buf, "%d:", str_len);
+	len_len = sprintf(ret->__buf, "%zu:", str_len);
 
 	ret->type = type;
 	ret->iov[0].iov_base = ret->__buf;
@@ -217,7 +223,7 @@ static bencode_item_t *__bencode_string_alloc(bencode_buffer_t *buf, const void 
 	return ret;
 }
 
-bencode_item_t *bencode_string_len_dup(bencode_buffer_t *buf, const char *s, int len) {
+bencode_item_t *bencode_string_len_dup(bencode_buffer_t *buf, const char *s, size_t len) {
 	char *sd = bencode_buffer_alloc(buf, len);
 	if (!sd)
 		return NULL;
@@ -225,22 +231,8 @@ bencode_item_t *bencode_string_len_dup(bencode_buffer_t *buf, const char *s, int
 	return bencode_string_len(buf, sd, len);
 }
 
-bencode_item_t *bencode_string_len(bencode_buffer_t *buf, const char *s, int len) {
+bencode_item_t *bencode_string_len(bencode_buffer_t *buf, const char *s, size_t len) {
 	return __bencode_string_alloc(buf, s, len, len, 1, BENCODE_STRING);
-}
-
-bencode_item_t *bencode_string_iovec(bencode_buffer_t *buf, const struct iovec *iov, int iov_cnt, int str_len) {
-	int i;
-
-	if (iov_cnt < 0)
-		return NULL;
-	if (str_len < 0) {
-		str_len = 0;
-		for (i = 0; i < iov_cnt; i++)
-			str_len += iov[i].iov_len;
-	}
-
-	return __bencode_string_alloc(buf, iov, str_len, iov_cnt, iov_cnt, BENCODE_IOVEC);
 }
 
 bencode_item_t *bencode_integer(bencode_buffer_t *buf, long long int i) {
@@ -265,21 +257,22 @@ bencode_item_t *bencode_integer(bencode_buffer_t *buf, long long int i) {
 	ret->iov[1].iov_len = 0;
 	ret->iov_cnt = 1;
 	ret->str_len = rlen;
+	ret->value = i;
 
 	return ret;
 }
 
-bencode_item_t *bencode_dictionary_add_len(bencode_item_t *dict, const char *key, int keylen, bencode_item_t *val) {
-	bencode_item_t *str;
+bencode_item_t *bencode_dictionary_add_len(bencode_item_t *dict, const char *key, size_t keylen, bencode_item_t *val) {
+	bencode_item_t *s;
 
 	if (!dict || !val)
 		return NULL;
 	assert(dict->type == BENCODE_DICTIONARY);
 
-	str = bencode_string_len(dict->buffer, key, keylen);
-	if (!str)
+	s = bencode_string_len(dict->buffer, key, keylen);
+	if (!s)
 		return NULL;
-	__bencode_container_add(dict, str);
+	__bencode_container_add(dict, s);
 	__bencode_container_add(dict, val);
 	return val;
 }
@@ -321,9 +314,7 @@ static int __bencode_iovec_dump(struct iovec *out, bencode_item_t *item) {
 		child = child->sibling;
 	}
 
-	if (item->type == BENCODE_IOVEC)
-		out += __bencode_iovec_cpy(out, item->iov[1].iov_base, item->iov[1].iov_len);
-	else if (item->iov[1].iov_base)
+	if (item->iov[1].iov_base)
 		out += __bencode_iovec_cpy(out, &item->iov[1], 1);
 
 	assert((out - orig) == item->iov_cnt);
@@ -331,7 +322,7 @@ static int __bencode_iovec_dump(struct iovec *out, bencode_item_t *item) {
 	return item->iov_cnt;
 }
 
-static int __bencode_str_dump(char *out, bencode_item_t *item) { 
+static size_t __bencode_str_dump(char *out, bencode_item_t *item) {
 	char *orig = out;
 	bencode_item_t *child;
 
@@ -344,9 +335,7 @@ static int __bencode_str_dump(char *out, bencode_item_t *item) {
 		child = child->sibling;
 	}
 
-	if (item->type == BENCODE_IOVEC)
-		out += __bencode_str_cpy(out, item->iov[1].iov_base, item->iov[1].iov_len);
-	else if (item->iov[1].iov_base)
+	if (item->iov[1].iov_base)
 		out += __bencode_str_cpy(out, &item->iov[1], 1);
 
 	assert((out - orig) == item->str_len);
@@ -370,9 +359,9 @@ struct iovec *bencode_iovec(bencode_item_t *root, int *cnt, unsigned int head, u
 	return ret;
 }
 
-char *bencode_collapse(bencode_item_t *root, int *len) {
+char *bencode_collapse(bencode_item_t *root, size_t *len) {
 	char *ret;
-	int l;
+	size_t l;
 
 	if (!root)
 		return NULL;
@@ -387,7 +376,7 @@ char *bencode_collapse(bencode_item_t *root, int *len) {
 	return ret;
 }
 
-char *bencode_collapse_dup(bencode_item_t *root, int *len) {
+char *bencode_collapse_dup(bencode_item_t *root, size_t *len) {
 	char *ret;
 	int l;
 
@@ -406,21 +395,21 @@ char *bencode_collapse_dup(bencode_item_t *root, int *len) {
 }
 
 static unsigned int __bencode_hash_str_len(const unsigned char *s, int len) {
-	unsigned long *ul;
-	unsigned int *ui;
-	unsigned short *us;
+	unsigned long ul;
+	unsigned int ui;
+	unsigned short us;
 
-	if (len >= sizeof(*ul)) {
-		ul = (void *) s;
-		return *ul % BENCODE_HASH_BUCKETS;
+	if (len >= sizeof(ul)) {
+		memcpy(&ul, s, sizeof(ul));
+		return ul % BENCODE_HASH_BUCKETS;
 	}
-	if (len >= sizeof(*ui)) {
-		ui = (void *) s;
-		return *ui % BENCODE_HASH_BUCKETS;
+	if (len >= sizeof(ui)) {
+		memcpy(&ui, s, sizeof(ui));
+		return ui % BENCODE_HASH_BUCKETS;
 	}
-	if (len >= sizeof(*us)) {
-		us = (void *) s;
-		return *us % BENCODE_HASH_BUCKETS;
+	if (len >= sizeof(us)) {
+		memcpy(&us, s, sizeof(us));
+		return us % BENCODE_HASH_BUCKETS;
 	}
 	if (len >= sizeof(*s))
 		return *s % BENCODE_HASH_BUCKETS;
@@ -428,9 +417,9 @@ static unsigned int __bencode_hash_str_len(const unsigned char *s, int len) {
 	return 0;
 }
 
-static unsigned int __bencode_hash_str(bencode_item_t *str) {
-	assert(str->type == BENCODE_STRING);
-	return __bencode_hash_str_len(str->iov[1].iov_base, str->iov[1].iov_len);
+static unsigned int __bencode_hash_str(bencode_item_t *s) {
+	assert(s->type == BENCODE_STRING);
+	return __bencode_hash_str_len(s->iov[1].iov_base, s->iov[1].iov_len);
 }
 
 static void __bencode_hash_insert(bencode_item_t *key, struct __bencode_hash *hash) {
@@ -635,13 +624,13 @@ static bencode_item_t *__bencode_decode(bencode_buffer_t *buf, const char *s, co
 	}
 }
 
-bencode_item_t *bencode_decode(bencode_buffer_t *buf, const char *s, int len) {
+bencode_item_t *bencode_decode(bencode_buffer_t *buf, const char *s, size_t len) {
 	assert(s != NULL);
 	return __bencode_decode(buf, s, s + len);
 }
 
 
-static int __bencode_dictionary_key_match(bencode_item_t *key, const char *keystr, int keylen) {
+static int __bencode_dictionary_key_match(bencode_item_t *key, const char *keystr, size_t keylen) {
 	assert(key->type == BENCODE_STRING);
 
 	if (keylen != key->iov[1].iov_len)
@@ -652,7 +641,7 @@ static int __bencode_dictionary_key_match(bencode_item_t *key, const char *keyst
 	return 1;
 }
 
-bencode_item_t *bencode_dictionary_get_len(bencode_item_t *dict, const char *keystr, int keylen) {
+bencode_item_t *bencode_dictionary_get_len(bencode_item_t *dict, const char *keystr, size_t keylen) {
 	bencode_item_t *key;
 	unsigned int bucket, i;
 	struct __bencode_hash *hash;
@@ -690,16 +679,111 @@ bencode_item_t *bencode_dictionary_get_len(bencode_item_t *dict, const char *key
 	return NULL;
 }
 
-void bencode_buffer_destroy_add(bencode_buffer_t *buf, free_func_t func, void *p) {
-	struct __bencode_free_list *li;
+static ssize_t __bencode_string(const char *s, ssize_t offset, size_t len) {
+	size_t pos;
+	unsigned long sl;
+	char *end;
 
-	if (!p)
-		return;
-	li = bencode_buffer_alloc(buf, sizeof(*li));
-	if (!li)
-		return;
-	li->ptr = p;
-	li->func = func;
-	li->next = buf->free_list;
-	buf->free_list = li;
+	for (pos = offset; s[pos] != ':' && isdigit(s[pos]) && pos < len; ++pos);
+	if (pos == len)
+		return -1;
+
+	sl = strtoul(s + offset, &end, 10);
+	if (s + offset == end || end != s + pos)
+		return -2;
+
+	if (pos + sl > len)
+		return -1;
+
+	return pos + sl + 1;
+}
+
+static ssize_t __bencode_integer(const char *s, ssize_t offset, size_t len) {
+	size_t pos;
+
+	if (s[offset + 1] == '-') {
+		if (offset + 3 < len && s[offset + 2] == '0' && s[offset + 3] == 'e') {
+			return -2;
+		}
+		++offset;
+	}
+
+	if (s[offset + 1] == 'e')
+		return -2;
+
+	if (s[offset + 1] == '0') {
+		if (offset + 2 < len && s[offset + 2] == 'e')
+			return offset + 3;
+		return -2;
+	}
+
+	for (pos = offset + 1; s[pos] != 'e' && pos < len; ++pos) {
+		if (s[pos] < '0' || s[pos] > '9')
+			return -2;
+	}
+
+	if (pos == len)
+		return -1;
+
+	return pos + 1;
+}
+
+static ssize_t __bencode_next(const char *s, ssize_t offset, size_t len);
+
+static ssize_t __bencode_list(const char *s, ssize_t offset, size_t len) {
+	for (++offset; s[offset] != 'e' && offset < len;) {
+		offset = __bencode_next(s, offset, len);
+		if (offset < 0)
+			return offset;
+	}
+
+	if (offset == len)
+		return -1;
+
+	return offset + 1;
+}
+
+static ssize_t __bencode_dictionary(const char *s, ssize_t offset, size_t len) {
+	for (++offset; s[offset] != 'e' && offset < len;) {
+		offset = __bencode_string(s, offset, len);
+		if (offset < 0)
+			return offset;
+		offset = __bencode_next(s, offset, len);
+		if (offset < 0)
+			return offset;
+	}
+
+	if (offset == len)
+		return -1;
+
+	return offset + 1;
+}
+
+static ssize_t __bencode_next(const char *s, ssize_t offset, size_t len) {
+	if (offset >= len)
+		return -1;
+	switch(s[offset]) {
+		case 'i':
+			return __bencode_integer(s, offset, len);
+		case 'l':
+			return __bencode_list(s, offset, len);
+		case 'd':
+			return __bencode_dictionary(s, offset, len);
+		case '0':
+		case '1':
+		case '2':
+		case '3':
+		case '4':
+		case '5':
+		case '6':
+		case '7':
+		case '8':
+		case '9':
+			return __bencode_string(s, offset, len);
+	}
+	return -2;
+}
+
+ssize_t bencode_valid(const char *s, size_t len) {
+	return __bencode_next(s, 0, len);
 }

@@ -5,13 +5,15 @@
 #include <glib.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/bn.h>
+#include <openssl/rsa.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <openssl/err.h>
 #include <time.h>
 
 #include "str.h"
-#include "aux.h"
+#include "helpers.h"
 #include "crypto.h"
 #include "log.h"
 #include "call.h"
@@ -19,7 +21,10 @@
 #include "ice.h"
 
 
-
+#if OPENSSL_VERSION_NUMBER >= 0x10002000L
+#define X509_getm_notBefore X509_get_notBefore
+#define X509_getm_notAfter X509_get_notAfter
+#endif
 
 
 #define DTLS_DEBUG 0
@@ -27,7 +32,7 @@
 #if DTLS_DEBUG
 #define __DBG(x...) ilog(LOG_DEBUG, x)
 #else
-#define __DBG(x...) ((void)0)
+#define __DBG(x...) ilogs(internals, LOG_DEBUG, x)
 #endif
 
 
@@ -35,7 +40,7 @@
 
 #define CERT_EXPIRY_TIME (60*60*24*30) /* 30 days */
 
-struct dtls_connection *dtls_ptr(struct stream_fd *sfd) {
+struct dtls_connection *dtls_ptr(stream_fd *sfd) {
 	if (!sfd)
 		return NULL;
 	struct packet_stream *ps = sfd->stream;
@@ -63,6 +68,11 @@ static unsigned int sha_512_func(unsigned char *, X509 *);
 
 static const struct dtls_hash_func hash_funcs[] = {
 	{
+		.name					= "sha-256",
+		.num_bytes				= 256 / 8,
+		.__func					= sha_256_func,
+	},
+	{
 		.name					= "sha-1",
 		.num_bytes				= 160 / 8,
 		.__func					= sha_1_func,
@@ -71,11 +81,6 @@ static const struct dtls_hash_func hash_funcs[] = {
 		.name					= "sha-224",
 		.num_bytes				= 224 / 8,
 		.__func					= sha_224_func,
-	},
-	{
-		.name					= "sha-256",
-		.num_bytes				= 256 / 8,
-		.__func					= sha_256_func,
 	},
 	{
 		.name					= "sha-384",
@@ -120,6 +125,7 @@ static void cert_free(void *p) {
 		EVP_PKEY_free(cert->pkey);
 	if (cert->x509)
 		X509_free(cert->x509);
+	g_queue_clear_full(&cert->fingerprints, free);
 }
 
 static void buf_dump_free(char *buf, size_t len) {
@@ -134,7 +140,7 @@ static void buf_dump_free(char *buf, size_t len) {
 		else
 			llen = len;
 
-		ilog(LOG_DEBUG, "--- %.*s", llen, p);
+		ilogs(srtp, LOG_DEBUG, "--- %.*s", llen, p);
 
 		if (!f)
 			break;
@@ -150,59 +156,115 @@ static void dump_cert(struct dtls_cert *cert) {
 	char *buf;
 	size_t len;
 
-	if (get_log_level() < LOG_DEBUG)
+	if (get_log_level(core) < LOG_DEBUG)
 		return;
 
 	/* cert */
 	fp = open_memstream(&buf, &len);
+	if (!fp) {
+		ilogs(crypto, LOG_ERROR, "Failed to allocate memory to dump DTLS certificate");
+		return;
+	}
 	PEM_write_X509(fp, cert->x509);
 	fclose(fp);
 
-	ilog(LOG_DEBUG, "Dump of DTLS certificate:");
+	ilogs(srtp, LOG_DEBUG, "Dump of DTLS certificate:");
 	buf_dump_free(buf, len);
 
 	/* key */
 	fp = open_memstream(&buf, &len);
+	if (!fp) {
+		ilogs(crypto, LOG_ERROR, "Failed to allocate memory to dump DTLS private key");
+		return;
+	}
 	PEM_write_PrivateKey(fp, cert->pkey, NULL, NULL, 0, 0, NULL);
 	fclose(fp);
 
-	ilog(LOG_DEBUG, "Dump of DTLS private key:");
+	ilogs(srtp, LOG_DEBUG, "Dump of DTLS private key:");
 	buf_dump_free(buf, len);
 }
 
 static int cert_init(void) {
 	X509 *x509 = NULL;
 	EVP_PKEY *pkey = NULL;
-	BIGNUM *exponent = NULL, *serial_number = NULL;
+	BIGNUM *serial_number = NULL;
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
 	RSA *rsa = NULL;
+	EC_KEY *ec_key = NULL;
+	BIGNUM *exponent = NULL;
+#endif
 	ASN1_INTEGER *asn1_serial_number;
 	X509_NAME *name;
 	struct dtls_cert *new_cert;
 
-	ilog(LOG_INFO, "Generating new DTLS certificate");
+	ilogs(crypto, LOG_INFO, "Generating new DTLS certificate");
 
 	/* objects */
 
-	pkey = EVP_PKEY_new();
-	exponent = BN_new();
-	rsa = RSA_new();
 	serial_number = BN_new();
 	name = X509_NAME_new();
 	x509 = X509_new();
-	if (!exponent || !pkey || !rsa || !serial_number || !name || !x509)
+	if (!serial_number || !name || !x509)
 		goto err;
+
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+	pkey = EVP_PKEY_new();
+	if (!pkey)
+		goto err;
+#endif
 
 	/* key */
 
-	if (!BN_set_word(exponent, 0x10001))
-		goto err;
+	if (rtpe_config.dtls_cert_cipher == DCC_RSA) {
+		ilogs(crypto, LOG_DEBUG, "Using %i-bit RSA key for DTLS certificate",
+				rtpe_config.dtls_rsa_key_size);
 
-	if (!RSA_generate_key_ex(rsa, 1024, exponent, NULL))
-		goto err;
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+		pkey = EVP_RSA_gen(rtpe_config.dtls_rsa_key_size);
+#else // <3.0
+		exponent = BN_new();
+		rsa = RSA_new();
+		if (!exponent || !rsa)
+			goto err;
 
-	if (!EVP_PKEY_assign_RSA(pkey, rsa))
-		goto err;
+		if (!BN_set_word(exponent, 0x10001))
+			goto err;
 
+		if (!RSA_generate_key_ex(rsa, rtpe_config.dtls_rsa_key_size, exponent, NULL))
+			goto err;
+
+		if (!EVP_PKEY_assign_RSA(pkey, rsa))
+			goto err;
+		rsa = NULL;
+#endif
+
+	}
+	else if (rtpe_config.dtls_cert_cipher == DCC_EC_PRIME256v1) {
+		ilogs(crypto, LOG_DEBUG, "Using EC-prime256v1 key for DTLS certificate");
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+		pkey = EVP_EC_gen("prime256v1");
+#else
+		ec_key = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
+
+		if (!ec_key)
+			goto err;
+
+		if (!EC_KEY_generate_key(ec_key))
+			goto err;
+
+		if (!EVP_PKEY_assign_EC_KEY(pkey, ec_key))
+			goto err;
+		ec_key = NULL;
+#endif
+	}
+	else
+		abort();
+
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	if (!pkey)
+		goto err;
+#endif
 	/* x509 cert */
 
 	if (!X509_set_pubkey(x509, pkey))
@@ -210,8 +272,13 @@ static int cert_init(void) {
 
 	/* serial */
 
+#if OPENSSL_VERSION_NUMBER < 0x10100000L
 	if (!BN_pseudo_rand(serial_number, 64, 0, 0))
 		goto err;
+#else
+	if (!BN_rand(serial_number, 64, 0, 0))
+		goto err;
+#endif
 
 	asn1_serial_number = X509_get_serialNumber(x509);
 	if (!asn1_serial_number)
@@ -227,8 +294,10 @@ static int cert_init(void) {
 
 	/* common name */
 
+	const char *cn = rtpe_config.software_id ?: "rtpengine";
+	size_t cn_len = MIN(strlen(cn), 63);
 	if (!X509_NAME_add_entry_by_NID(name, NID_commonName, MBSTRING_UTF8,
-				(unsigned char *) "rtpengine", -1, -1, 0))
+				(unsigned char *) cn, cn_len, -1, 0))
 		goto err;
 
 	if (!X509_set_subject_name(x509, name))
@@ -239,22 +308,27 @@ static int cert_init(void) {
 
 	/* cert lifetime */
 
-	if (!X509_gmtime_adj(X509_get_notBefore(x509), -60*60*24))
+	if (!X509_gmtime_adj(X509_getm_notBefore(x509), -60*60*24))
 		goto err;
 
-	if (!X509_gmtime_adj(X509_get_notAfter(x509), CERT_EXPIRY_TIME))
+	if (!X509_gmtime_adj(X509_getm_notAfter(x509), CERT_EXPIRY_TIME))
 		goto err;
 
 	/* sign it */
 
-	if (!X509_sign(x509, pkey, EVP_sha1()))
+	if (!X509_sign(x509, pkey, rtpe_config.dtls_signature == DSIG_SHA1 ? EVP_sha1() : EVP_sha256()))
 		goto err;
 
 	/* digest */
 
 	new_cert = obj_alloc0("dtls_cert", sizeof(*new_cert), cert_free);
-	new_cert->fingerprint.hash_func = &hash_funcs[0];
-	dtls_fingerprint_hash(&new_cert->fingerprint, x509);
+
+	for (int i = 0; i < num_hash_funcs; i++) {
+		struct dtls_fingerprint *fp = malloc(sizeof(*fp));
+		fp->hash_func = &hash_funcs[i];
+		dtls_fingerprint_hash(fp, x509);
+		g_queue_push_tail(&new_cert->fingerprints, fp);
+	}
 
 	new_cert->x509 = x509;
 	new_cert->pkey = pkey;
@@ -274,21 +348,27 @@ static int cert_init(void) {
 
 	/* cleanup */
 
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
 	BN_free(exponent);
+#endif
 	BN_free(serial_number);
 	X509_NAME_free(name);
 
 	return 0;
 
 err:
-	ilog(LOG_ERROR, "Failed to generate DTLS certificate");
+	ilogs(crypto, LOG_ERROR, "Failed to generate DTLS certificate");
 
 	if (pkey)
 		EVP_PKEY_free(pkey);
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
 	if (exponent)
 		BN_free(exponent);
 	if (rsa)
 		RSA_free(rsa);
+	if (ec_key)
+		EC_KEY_free(ec_key);
+#endif
 	if (x509)
 		X509_free(x509);
 	if (serial_number)
@@ -297,7 +377,7 @@ err:
 	return -1;
 }
 
-int dtls_init() {
+int dtls_init(void) {
 	int i;
 	char *p;
 
@@ -321,11 +401,14 @@ int dtls_init() {
 	return 0;
 }
 
-static void __dtls_timer(void *p) {
+static enum thread_looper_action __dtls_timer(void) {
 	struct dtls_cert *c;
 	long int left;
 
 	c = dtls_cert();
+	if (!c)
+		return TLA_BREAK;
+
 	left = c->expires - rtpe_now.tv_sec;
 	if (left > CERT_EXPIRY_TIME/2)
 		goto out;
@@ -334,10 +417,13 @@ static void __dtls_timer(void *p) {
 
 out:
 	obj_put(c);
+	return TLA_CONTINUE;
 }
 
-void dtls_timer(struct poller *p) {
-	poller_add_timer(p, __dtls_timer, NULL);
+void dtls_timer(void) {
+	thread_create_looper(__dtls_timer, rtpe_config.idle_scheduling,
+			rtpe_config.idle_priority, "DTLS refresh",
+			((long long) CERT_EXPIRY_TIME / 7) * 1000000);
 }
 
 static unsigned int generic_func(unsigned char *o, X509 *x, const EVP_MD *md) {
@@ -374,14 +460,27 @@ static unsigned int sha_512_func(unsigned char *o, X509 *x) {
 }
 
 
-struct dtls_cert *dtls_cert() {
+struct dtls_cert *dtls_cert(void) {
 	struct dtls_cert *ret;
 
 	rwlock_lock_r(&__dtls_cert_lock);
-	ret = obj_get(__dtls_cert);
+	ret = __dtls_cert ? obj_get(__dtls_cert) : NULL;
 	rwlock_unlock_r(&__dtls_cert_lock);
 
 	return ret;
+}
+
+void dtls_cert_free(void) {
+	rwlock_lock_w(&__dtls_cert_lock);
+
+	if (__dtls_cert)
+		obj_put(__dtls_cert);
+
+	__dtls_cert = NULL;
+
+	rwlock_unlock_w(&__dtls_cert_lock);
+
+	return ;
 }
 
 static int verify_callback(int ok, X509_STORE_CTX *store) {
@@ -405,9 +504,19 @@ static int verify_callback(int ok, X509_STORE_CTX *store) {
 
 	if (ps->dtls_cert)
 		X509_free(ps->dtls_cert);
-	ps->dtls_cert = X509_dup(X509_STORE_CTX_get_current_cert(store));
+	ps->dtls_cert = NULL;
+#if OPENSSL_VERSION_NUMBER >= 0x10100010L
+	X509 *cert = X509_STORE_CTX_get0_cert(store);
+	if (!cert)
+		cert = X509_STORE_CTX_get_current_cert(store);
+#else
+	X509 *cert = X509_STORE_CTX_get_current_cert(store);
+#endif
+	if (!cert)
+		return 0;
+	ps->dtls_cert = X509_dup(cert);
 
-	if (!media->fingerprint.hash_func)
+	if (!media->fingerprint.hash_func || !media->fingerprint.digest_len)
 		return 1; /* delay verification */
 
 	if (dtls_verify_cert(ps))
@@ -428,7 +537,7 @@ int dtls_verify_cert(struct packet_stream *ps) {
 	dtls_hash(media->fingerprint.hash_func, ps->dtls_cert, fp);
 
 	if (memcmp(media->fingerprint.digest, fp, media->fingerprint.hash_func->num_bytes)) {
-		ilog(LOG_WARNING, "DTLS: Peer certificate rejected - fingerprint mismatch");
+		ilogs(crypto, LOG_WARNING, "DTLS: Peer certificate rejected - fingerprint mismatch");
 		__DBG("fingerprint expected: %02x%02x%02x%02x%02x%02x%02x%02x received: %02x%02x%02x%02x%02x%02x%02x%02x",
 			media->fingerprint.digest[0], media->fingerprint.digest[1],
 			media->fingerprint.digest[2], media->fingerprint.digest[3],
@@ -440,20 +549,20 @@ int dtls_verify_cert(struct packet_stream *ps) {
 	}
 
 	PS_SET(ps, FINGERPRINT_VERIFIED);
-	ilog(LOG_INFO, "DTLS: Peer certificate accepted");
+	ilogs(crypto, LOG_INFO, "DTLS: Peer certificate accepted");
 
 	return 0;
 }
 
 static int try_connect(struct dtls_connection *d) {
 	int ret, code;
-
-	if (d->connected)
-		return 0;
+	unsigned char buf[0x10000];
 
 	__DBG("try_connect(%i)", d->active);
 
-	if (d->active)
+	if (d->connected)
+		ret = SSL_read(d->ssl, buf, sizeof(buf)); /* retransmission after connected - handshake lost */
+	else if (d->active)
 		ret = SSL_connect(d->ssl);
 	else
 		ret = SSL_accept(d->ssl);
@@ -463,18 +572,31 @@ static int try_connect(struct dtls_connection *d) {
 	ret = 0;
 	switch (code) {
 		case SSL_ERROR_NONE:
-			ilog(LOG_DEBUG, "DTLS handshake successful");
-			d->connected = 1;
-			ret = 1;
+			if (d->connected) {
+				ilogs(crypto, LOG_INFO, "DTLS data received after handshake, code: %i", code);
+			} else {
+				ilogs(crypto, LOG_DEBUG, "DTLS handshake successful");
+				d->connected = 1;
+				ret = 1;
+			}
 			break;
 
 		case SSL_ERROR_WANT_READ:
 		case SSL_ERROR_WANT_WRITE:
+			if (d->connected) {
+				ilogs(crypto, LOG_INFO, "DTLS data received after handshake, code: %i", code);
+			}
+			break;
+                case SSL_ERROR_ZERO_RETURN:
+			if (d->connected) {
+				ilogs(crypto, LOG_INFO, "DTLS peer has closed the connection");
+				ret = -2;
+			}
 			break;
 
 		default:
 			ret = ERR_peek_last_error();
-			ilog(LOG_ERROR, "DTLS error: %i (%s)", code, ERR_reason_error_string(ret));
+			ilogs(crypto, LOG_ERROR, "DTLS error: %i (%s)", code, ERR_reason_error_string(ret));
 			ret = -1;
 			break;
 	}
@@ -485,9 +607,12 @@ static int try_connect(struct dtls_connection *d) {
 int dtls_connection_init(struct dtls_connection *d, struct packet_stream *ps, int active,
 		struct dtls_cert *cert)
 {
-	unsigned long err;
+	if (!cert) {
+		ilogs(crypto, LOG_ERR, "Cannot establish DTLS: no certificate available");
+		return -1;
+	}
 
-	__DBG("dtls_connection_init(%i)", active);
+	unsigned long err;
 
 	if (d->init) {
 		if ((d->active && active) || (!d->active && !active))
@@ -496,6 +621,8 @@ int dtls_connection_init(struct dtls_connection *d, struct packet_stream *ps, in
 	}
 
 	d->ptr = ps;
+
+	ilogs(crypto, LOG_DEBUG, "Creating %s DTLS connection context", active ? "active" : "passive");
 
 #if OPENSSL_VERSION_NUMBER >= 0x10002000L
 	d->ssl_ctx = SSL_CTX_new(active ? DTLS_client_method() : DTLS_server_method());
@@ -513,7 +640,7 @@ int dtls_connection_init(struct dtls_connection *d, struct packet_stream *ps, in
 	SSL_CTX_set_verify(d->ssl_ctx, SSL_VERIFY_PEER | SSL_VERIFY_FAIL_IF_NO_PEER_CERT,
 			verify_callback);
 	SSL_CTX_set_verify_depth(d->ssl_ctx, 4);
-	SSL_CTX_set_cipher_list(d->ssl_ctx, "ALL:!ADH:!LOW:!EXP:!MD5:@STRENGTH");
+	SSL_CTX_set_cipher_list(d->ssl_ctx, rtpe_config.dtls_ciphers);
 
 	if (SSL_CTX_set_tlsext_use_srtp(d->ssl_ctx, ciphers_str))
 		goto error;
@@ -534,22 +661,29 @@ int dtls_connection_init(struct dtls_connection *d, struct packet_stream *ps, in
 	d->init = 1;
 	SSL_set_mode(d->ssl, SSL_MODE_ENABLE_PARTIAL_WRITE | SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER);
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+	int ec_groups[1] = { NID_X9_62_prime256v1 };
+	SSL_set1_groups(d->ssl, &ec_groups, G_N_ELEMENTS(ec_groups));
+#else // <3.0
 	EC_KEY* ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
 	if (ecdh == NULL)
 		goto error;
 	SSL_set_options(d->ssl, SSL_OP_SINGLE_ECDH_USE);
 	SSL_set_tmp_ecdh(d->ssl, ecdh);
 	EC_KEY_free(ecdh);
+#endif
 
 #if defined(SSL_OP_NO_QUERY_MTU)
 	SSL_CTX_set_options(d->ssl_ctx, SSL_OP_NO_QUERY_MTU);
-	SSL_set_mtu(d->ssl, 1500);
+	SSL_set_mtu(d->ssl, rtpe_config.dtls_mtu);
 #if defined(DTLS_set_link_mtu) || defined(DTLS_CTRL_SET_LINK_MTU) || OPENSSL_VERSION_NUMBER >= 0x10100000L
-	DTLS_set_link_mtu(d->ssl, 1500);
+	DTLS_set_link_mtu(d->ssl, rtpe_config.dtls_mtu);
 #endif
 #endif
 
 	d->active = active ? -1 : 0;
+
+	random_string(d->tls_id, sizeof(d->tls_id));
 
 done:
 	return 0;
@@ -567,7 +701,7 @@ error:
 	if (d->ssl_ctx)
 		SSL_CTX_free(d->ssl_ctx);
 	ZERO(*d);
-	ilog(LOG_ERROR, "Failed to init DTLS connection: %s", ERR_reason_error_string(err));
+	ilogs(crypto, LOG_ERROR, "Failed to init DTLS connection: %s", ERR_reason_error_string(err));
 	return -1;
 }
 
@@ -617,21 +751,7 @@ found:
 	i += cs->master_salt_len;
 	memcpy(server.master_salt, &keys[i], cs->master_salt_len);
 
-	__DBG("SRTP keys negotiated: "
-			"c-m: %02x%02x%02x%02x%02x%02x%02x%02x "
-			"c-s: %02x%02x%02x%02x%02x%02x%02x%02x "
-			"s-m: %02x%02x%02x%02x%02x%02x%02x%02x "
-			"s-s: %02x%02x%02x%02x%02x%02x%02x%02x",
-			client.master_key[0], client.master_key[1], client.master_key[2], client.master_key[3],
-			client.master_key[4], client.master_key[5], client.master_key[6], client.master_key[7],
-			client.master_salt[0], client.master_salt[1], client.master_salt[2], client.master_salt[3],
-			client.master_salt[4], client.master_salt[5], client.master_salt[6], client.master_salt[7],
-			server.master_key[0], server.master_key[1], server.master_key[2], server.master_key[3],
-			server.master_key[4], server.master_key[5], server.master_key[6], server.master_key[7],
-			server.master_salt[0], server.master_salt[1], server.master_salt[2], server.master_salt[3],
-			server.master_salt[4], server.master_salt[5], server.master_salt[6], server.master_salt[7]);
-
-	ilog(LOG_INFO, "DTLS-SRTP successfully negotiated");
+	ilogs(crypto, LOG_INFO, "DTLS-SRTP successfully negotiated using %s", cs->name);
 
 	if (d->active) {
 		/* we're the client */
@@ -646,8 +766,8 @@ found:
 			crypto_init(&ps->selected_sfd->crypto, &client);
 	}
 	// it's possible that ps->selected_sfd is not from ps->sfds list (?)
-	for (GList *l = ps->sfds.head; l; l = l->next) {
-		struct stream_fd *sfd = l->data;
+	for (__auto_type l = ps->sfds.head; l; l = l->next) {
+		stream_fd *sfd = l->data;
 		if (d->active) /* we're the client */
 			crypto_init(&sfd->crypto, &server);
 		else /* we're the server */
@@ -661,15 +781,15 @@ found:
 
 error:
 	if (!spp)
-		ilog(LOG_ERROR, "Failed to set up SRTP after DTLS negotiation: %s", err);
+		ilogs(crypto, LOG_ERROR, "Failed to set up SRTP after DTLS negotiation: %s", err);
 	else
-		ilog(LOG_ERROR, "Failed to set up SRTP after DTLS negotiation: %s (profile \"%s\")",
+		ilogs(crypto, LOG_ERROR, "Failed to set up SRTP after DTLS negotiation: %s (profile \"%s\")",
 				err, spp->name);
 	return -1;
 }
 
 /* called with call locked in W or R with ps->in_lock held */
-int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
+int dtls(stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 	struct packet_stream *ps = sfd->stream;
 	int ret;
 	unsigned char buf[0x10000];
@@ -683,7 +803,7 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 		return 0;
 
 	if (s)
-		__DBG("dtls packet input: len %u %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+		__DBG("dtls packet input: len %zu %02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
 			s->len,
 			(unsigned char) s->s[0], (unsigned char) s->s[1], (unsigned char) s->s[2], (unsigned char) s->s[3],
 			(unsigned char) s->s[4], (unsigned char) s->s[5], (unsigned char) s->s[6], (unsigned char) s->s[7],
@@ -694,7 +814,7 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 		return -1;
 
 	if (s) {
-		ilog(LOG_DEBUG, "Processing incoming DTLS packet");
+		ilogs(srtp, LOG_DEBUG, "Processing incoming DTLS packet");
 		BIO_write(d->r_bio, s->s, s->len);
 		/* we understand this as preference of DTLS over SDES */
 		MEDIA_CLEAR(ps->media, SDES);
@@ -702,8 +822,13 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 
 	ret = try_connect(d);
 	if (ret == -1) {
-		ilog(LOG_ERROR, "DTLS error on local port %u", sfd->socket.local.port);
+		ilogs(srtp, LOG_ERROR, "DTLS error on local port %u", sfd->socket.local.port);
 		/* fatal error */
+		dtls_connection_cleanup(d);
+		return 0;
+	}
+	if (ret == -2) {
+		/* peer close connection */
 		dtls_connection_cleanup(d);
 		return 0;
 	}
@@ -711,7 +836,7 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 		/* connected! */
 		mutex_lock(&ps->out_lock); // nested lock!
 		if (dtls_setup_crypto(ps, d))
-			/* XXX ?? */ ;
+			{} /* XXX ?? */
 		mutex_unlock(&ps->out_lock);
 
 		if (PS_ISSET(ps, RTP) && PS_ISSET(ps, RTCP) && ps->rtcp_sibling
@@ -722,7 +847,7 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 			mutex_lock(&ps->rtcp_sibling->in_lock);
 			mutex_lock(&ps->rtcp_sibling->out_lock);
 			if (dtls_setup_crypto(ps->rtcp_sibling, d))
-				/* XXX ?? */ ;
+				{} /* XXX ?? */
 			mutex_unlock(&ps->rtcp_sibling->out_lock);
 			mutex_unlock(&ps->rtcp_sibling->in_lock);
 		}
@@ -734,7 +859,7 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 			break;
 
 		if (ret > sizeof(buf)) {
-			ilog(LOG_ERROR, "BIO buffer overflow");
+			ilogs(srtp, LOG_ERROR, "BIO buffer overflow");
 			(void) BIO_reset(d->w_bio);
 			break;
 		}
@@ -750,11 +875,18 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 			buf[8], buf[9], buf[10], buf[11],
 			buf[12], buf[13], buf[14], buf[15]);
 
-		if (!fsin)
+		if (!fsin) {
 			fsin = &ps->endpoint;
+			if (fsin->port == 9 || fsin->address.family == NULL)
+				fsin = NULL;
+		}
 
-		ilog(LOG_DEBUG, "Sending DTLS packet");
-		socket_sendto(&sfd->socket, buf, ret, fsin);
+		if (fsin) {
+			ilogs(srtp, LOG_DEBUG, "Sending DTLS packet");
+			socket_sendto(&sfd->socket, buf, ret, fsin);
+			atomic64_inc_na(&ps->stats_out->packets);
+			atomic64_add_na(&ps->stats_out->bytes, ret);
+		}
 	}
 
 	return 0;
@@ -762,47 +894,48 @@ int dtls(struct stream_fd *sfd, const str *s, const endpoint_t *fsin) {
 
 /* call must be locked */
 void dtls_shutdown(struct packet_stream *ps) {
-
 	if (!ps)
 		return;
 
 	__DBG("dtls_shutdown");
 
+	bool had_dtls = false;
 
 	if (ps->ice_dtls.init) {
 		if (ps->ice_dtls.connected && ps->ice_dtls.ssl) {
+			had_dtls = true;
 			SSL_shutdown(ps->ice_dtls.ssl);
 		}
 		dtls_connection_cleanup(&ps->ice_dtls);
 	}
-	for (GList *l = ps->sfds.head; l; l = l->next) {
-		struct stream_fd *sfd = l->data;
+	for (__auto_type l = ps->sfds.head; l; l = l->next) {
+		stream_fd *sfd = l->data;
 
 		struct dtls_connection *d = &sfd->dtls;
 		if (!d->init)
 			continue;
 
 		if (d->connected && d->ssl) {
+			had_dtls = true;
 			SSL_shutdown(d->ssl);
 			dtls(sfd, NULL, &ps->endpoint);
 		}
 
 		dtls_connection_cleanup(d);
-
-		crypto_reset(&sfd->crypto);
 	}
-
 
 	if (ps->dtls_cert) {
 		X509_free(ps->dtls_cert);
 		ps->dtls_cert = NULL;
 	}
 
-	crypto_reset(&ps->crypto);
+	if (had_dtls)
+		ilogs(crypto, LOG_DEBUG, "Reuse SRTP crypto key");
 }
 
 void dtls_connection_cleanup(struct dtls_connection *c) {
-	__DBG("dtls_connection_cleanup");
+	if (c->ssl_ctx || c->ssl)
+		ilogs(crypto, LOG_DEBUG, "Resetting DTLS connection context");
 
 	if (c->ssl_ctx)
 		SSL_CTX_free(c->ssl_ctx);
