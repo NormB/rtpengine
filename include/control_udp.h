@@ -1,21 +1,16 @@
 #ifndef __CONTROL_UDP_H__
 #define __CONTROL_UDP_H__
 
-
-
-
-
-#include <pcre.h>
+#include <pcre2.h>
 #include <glib.h>
 #include <time.h>
 #include <netinet/in.h>
+
 #include "obj.h"
-#include "aux.h"
+#include "helpers.h"
 #include "cookie_cache.h"
 #include "udp_listener.h"
 #include "socket.h"
-
-
 
 #define RE_UDP_COOKIE 		1
 #define RE_UDP_UL_CMD 		2
@@ -38,28 +33,21 @@
 #define RE_UDP_V_FLAGS 		19
 #define RE_UDP_V_PARMS 		20
 
-struct poller;
-
-
-
-
-
 struct control_udp {
 	struct obj		obj;
 
 	struct cookie_cache	cookie_cache;
-	socket_t		udp_listeners[2];
+	socket_t		udp_listener;
 
-	pcre			*parse_re;
-	pcre_extra		*parse_ree;
-	pcre			*fallback_re;
+	pcre2_code		*parse_re;
+	pcre2_code		*fallback_re;
 };
 
 
 
 
 
-struct control_udp *control_udp_new(struct poller *, endpoint_t *);
+struct control_udp *control_udp_new(const endpoint_t *);
 
 
 

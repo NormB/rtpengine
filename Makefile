@@ -1,4 +1,11 @@
-RTPENGINE_ROOT_DIR=.
+.DEFAULT_GOAL := all
+
+with_transcoding ?= yes
+
+export top_srcdir = $(CURDIR)
+
+# Initialize all flags, so that we only compute them once.
+include lib/deps.Makefile
 
 include lib/lib.Makefile
 
@@ -6,39 +13,59 @@ include lib/lib.Makefile
 
 all:
 	$(MAKE) -C daemon
+ifeq ($(with_transcoding),yes)
 	$(MAKE) -C recording-daemon
-	$(MAKE) -C iptables-extension
+	$(MAKE) -C perf-tester
+endif
+
+install:
+	$(MAKE) -C daemon install
+ifeq ($(with_transcoding),yes)
+	$(MAKE) -C recording-daemon install
+	$(MAKE) -C perf-tester install
+endif
+	mkdir -p $(DESTDIR)/usr/libexec/rtpengine/ $(DESTDIR)/usr/bin $(DESTDIR)/usr/share/man/man1
+	install -m 0755 utils/rtpengine-get-table $(DESTDIR)/usr/libexec/rtpengine/
+	install -m 0755 utils/rtpengine-ctl utils/rtpengine-ng-client $(DESTDIR)/usr/bin/
+	install -m 0644 utils/rtpengine-ctl.1 utils/rtpengine-ng-client.1 $(DESTDIR)/usr/share/man/man1
+
+coverity:
+	$(MAKE) -C daemon
+ifeq ($(with_transcoding),yes)
+	$(MAKE) -C recording-daemon
+	$(MAKE) -C perf-tester
+endif
 
 .PHONY: with-kernel
 
 with-kernel: all
 	$(MAKE) -C kernel-module
 
+install-with-kernel: all install
+	$(MAKE) -C kernel-module install
+
 distclean clean:
 	$(MAKE) -C daemon clean
 	$(MAKE) -C recording-daemon clean
-	$(MAKE) -C iptables-extension clean
+	$(MAKE) -C perf-tester clean
 	$(MAKE) -C kernel-module clean
 	$(MAKE) -C t clean
-	rm -rf project.tgz cov-int
+	$(MAKE) -C lib clean
+	rm -f config.mk
 
 .DEFAULT:
 	$(MAKE) -C daemon $@
 	$(MAKE) -C recording-daemon $@
-	$(MAKE) -C iptables-extension $@
+	$(MAKE) -C perf-tester
 	$(MAKE) -C kernel-module $@
 
-.PHONY: check
+.PHONY: check asan-check asan
 
 check: all
 	$(MAKE) -C t
 
-coverity:
-	cov-build --dir cov-int $(MAKE) check
-	tar -czf project.tgz cov-int
-	curl --form token=$(COVERITY_RTPENGINE_TOKEN) \
-	  --form email=$(DEBEMAIL) \
-	  --form file=@project.tgz \
-	  --form version="$(RTPENGINE_VERSION)" \
-	  --form description="automatic upload" \
-	  https://scan.coverity.com/builds?project=$(COVERITY_RTPENGINE_PROJECT)
+asan-check:
+	DO_ASAN_FLAGS=1 $(MAKE) check
+
+asan:
+	DO_ASAN_FLAGS=1 $(MAKE)

@@ -5,7 +5,7 @@
 int (*iptables_add_rule)(const socket_t *local_sock, const str *comment);
 int (*iptables_del_rule)(const socket_t *local_sock);
 
-#ifdef WITH_IPTABLES_OPTION
+#ifdef HAVE_LIBIPTC
 
 #include <stdio.h>
 #include <errno.h>
@@ -20,7 +20,7 @@ int (*iptables_del_rule)(const socket_t *local_sock);
 #include <unistd.h>
 #include <sys/stat.h>
 #include <fcntl.h>
-#include "aux.h"
+#include "helpers.h"
 #include "log.h"
 #include "socket.h"
 
@@ -52,7 +52,7 @@ struct ipv6_ipt_entry {
 };
 
 
-static mutex_t __xt_lock;
+static mutex_t __xt_lock = MUTEX_STATIC_INIT;
 static int __xt_lock_fd = -1;
 
 
@@ -77,7 +77,7 @@ static void xt_lock(void) {
 static void xt_unlock(void) {
 	if (__xt_lock_fd != -1)
 		close(__xt_lock_fd);
-	__xt_lock_fd = -1;
+	__xt_lock_fd = -1; // coverity[missing_lock : FALSE]
 	mutex_unlock(&__xt_lock);
 }
 
@@ -103,7 +103,7 @@ static void ip46tables_fill_matches(struct ipt_matches *matches, const socket_t 
 static void ip4_fill_entry(struct ipv4_ipt_entry *entry, const socket_t *local_sock, const str *comment) {
 	ZERO(*entry);
 	entry->entry.ip.proto = IPPROTO_UDP;
-	entry->entry.ip.dst = local_sock->local.address.u.ipv4;
+	entry->entry.ip.dst = local_sock->local.address.ipv4;
 	memset(&entry->entry.ip.dmsk, 0xff, sizeof(entry->entry.ip.dmsk));
 	entry->entry.target_offset = G_STRUCT_OFFSET(struct ipv4_ipt_entry, matches.target);
 
@@ -114,7 +114,7 @@ static void ip4_fill_entry(struct ipv4_ipt_entry *entry, const socket_t *local_s
 static void ip6_fill_entry(struct ipv6_ipt_entry *entry, const socket_t *local_sock, const str *comment) {
 	ZERO(*entry);
 	entry->entry.ipv6.proto = IPPROTO_UDP;
-	entry->entry.ipv6.dst = local_sock->local.address.u.ipv6;
+	entry->entry.ipv6.dst = local_sock->local.address.ipv6;
 	entry->entry.ipv6.flags |= IP6T_F_PROTO;
 	memset(&entry->entry.ipv6.dmsk, 0xff, sizeof(entry->entry.ipv6.dmsk));
 	entry->entry.target_offset = G_STRUCT_OFFSET(struct ipv6_ipt_entry, matches.target);
@@ -308,7 +308,7 @@ static int __iptables_del_rule(const socket_t *local_sock) {
 	return 0;
 }
 
-#endif // WITH_IPTABLES_OPTION
+#endif // HAVE_LIBIPTC
 
 static int __iptables_stub(void) {
 	return 0;
@@ -325,9 +325,8 @@ void iptables_init(void) {
 		return;
 	}
 
-#ifdef WITH_IPTABLES_OPTION
+#ifdef HAVE_LIBIPTC
 
-	mutex_init(&__xt_lock);
 	iptables_add_rule = __iptables_add_rule;
 	iptables_del_rule = __iptables_del_rule;
 
@@ -376,6 +375,6 @@ out:
 	if (err)
 		ilog(LOG_ERROR, "Failed to flush iptables chain: %s (%s)", err, strerror(errno));
 
-#endif // WITH_IPTABLES_OPTION
+#endif // HAVE_LIBIPTC
 
 }

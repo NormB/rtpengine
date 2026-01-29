@@ -1,42 +1,27 @@
-PWD    := $(shell pwd)
 KSRC   ?= /lib/modules/$(shell uname -r)/build
 KBUILD := $(KSRC)
-M      ?= $(PWD)
+M      ?= $(CURDIR)
 
-ifeq ($(RTPENGINE_VERSION),)
-  DPKG_PRSCHNGLG= $(shell which dpkg-parsechangelog 2>/dev/null)
-  DEB_CHANGELOG=$(shell test -f $(M)/../debian/changelog && echo $(M)/../debian/changelog || echo $(M)/debian/changelog)
-  ifneq ($(DPKG_PRSCHNGLG),)
-    DPKG_PRSCHNGLG=$(shell dpkg-parsechangelog -l$(DEB_CHANGELOG) | awk '/^Version: / {print $$2}')
-  endif
-  GIT_BR_COMMIT=git-$(shell cd $(M) && git rev-parse --abbrev-ref --symbolic-full-name HEAD 2> /dev/null)-$(shell cd $(M) && git rev-parse --short HEAD 2> /dev/null)
+export M
 
-  ifneq ($(DPKG_PRSCHNGLG),)
-    RTPENGINE_VERSION+=$(DPKG_PRSCHNGLG)
-  endif
-  ifneq ($(GIT_BR_COMMIT),git--)
-    RTPENGINE_VERSION+=$(GIT_BR_COMMIT)
-  endif
+include $(M)/rtpengine-kmod.mk
 
-  ifeq ($(RTPENGINE_VERSION),)
-    RTPENGINE_VERSION+=undefined
-  endif
-endif
-EXTRA_CFLAGS+=	-DRTPENGINE_VERSION="\"$(RTPENGINE_VERSION)\""
+ccflags-y    += -DRTPENGINE_VERSION="\"$(RTPENGINE_VERSION)\""
 
-EXTRA_CFLAGS += -D__RE_EXTERNAL
+obj-m        += nft_rtpengine.o
 
-obj-m        += xt_RTPENGINE.o
-
-.PHONY:		modules clean patch install
+.PHONY:		modules clean install
 
 modules:
-		$(MAKE) -C $(KBUILD) M=$(PWD) O=$(KBUILD) modules
+		$(MAKE) -C $(KBUILD) M=$(CURDIR) O=$(KBUILD) modules
 
 clean:
-		$(MAKE) -C $(KBUILD) M=$(PWD) clean || true
-
-patch:
-		../utils/patch-kernel magic "$(PWD)" "$(KERNEL)" "$(RTPENGINE_VERSION)"
+		$(MAKE) -C $(KBUILD) M=$(CURDIR) clean || true
+		rm -f rtpengine-kmod.mk
 
 install:
+	install -D nft_rtpengine.ko $(DESTDIR)/lib/modules/$(shell uname -r)/updates/nft_rtpengine.ko
+	depmod -a
+
+$(M)/rtpengine-kmod.mk:
+	$(M)/gen-rtpengine-kmod-flags >$@

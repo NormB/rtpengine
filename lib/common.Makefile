@@ -1,65 +1,76 @@
+.DEFAULT_GOAL := all
+
 include ../lib/lib.Makefile
 
-all:
-	$(MAKE) $(TARGET) $(MANS)
+CFLAGS += -fPIE
+LDFLAGS += -pie
+LDLIBS += -latomic
 
-$(TARGET):	$(OBJS) .depend Makefile
-	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(OBJS) $(LDLIBS)
+all:	$(TARGET) $(MANS)
+
+
+OBJS = $(SRCS:.c=.o)
+
+LIBOBJS = $(LIBSRCS:.c=.o)
+
+DAEMONOBJS = $(DAEMONSRCS:.c=.o)
+
+LIBASMOBJS = $(LIBASM:.S=.o)
+
+ALLOBJS = $(OBJS) $(LIBOBJS) $(LIBASMOBJS) $(DAEMONOBJS)
+
+
+$(OBJS): %.o: %.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(LIBOBJS): %.o: ../lib/%.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(DAEMONOBJS): %.o: ../daemon/%.c
+	$(CC) -c $(CFLAGS) $< -o $@
+
+$(LIBASMOBJS): %.o: ../lib/%.S
+	$(CC) -c $(ASFLAGS) $< -o $@
+
+
+$(TARGET):	$(ALLOBJS) Makefile
+	$(CC) $(LDFLAGS) $(CFLAGS) -o $@ $(ALLOBJS) $(LDLIBS)
+
 
 debug:
 	$(MAKE) DBG=yes all
 
-dep:		.depend
 
-BUILD_TEST_ALTS = fix_frame_channel_layout.h dtmf_rx_fillin.h
+BUILD_TEST_ALTS = ../lib/fix_frame_channel_layout.h ../lib/dtmf_rx_fillin.h ../lib/spandsp_logging.h
 
 clean:
-	rm -f $(OBJS) $(TARGET) $(LIBSRCS) $(DAEMONSRCS) $(MANS) $(ADD_CLEAN) .depend core core.*
-	rm -f $(BUILD_TEST_ALTS) $(BUILD_TEST_ALTS:.h=-test{.c,}) *.strhash.c $(HASHSRCS)
-
-.depend:	$(SRCS) $(LIBSRCS) $(DAEMONSRCS) Makefile
-	$(CC) $(CFLAGS) -M $(SRCS) $(LIBSRCS) $(DAEMONSRCS) | sed -e 's/:/ .depend:/' > .depend
+	rm -f $(ALLOBJS) $(TARGET) $(LIBSRCS) $(LIBASM) $(DAEMONSRCS) $(MANS) $(ADD_CLEAN) core core.*
+	rm -f $(BUILD_TEST_ALTS) $(BUILD_TEST_ALTS:.h=-test) *.strhash.c
 
 install:
 
-$(OBJS):	Makefile
+$(ALLOBJS):	Makefile ../include/* ../lib/*.h ../kernel-module/*.h
 
-$(LIBSRCS):	$(patsubst %,../lib/%,$(LIBSRCS))
-		rm -f "$@"
-		echo '/******** GENERATED FILE ********/' > "$@"
-		cat ../lib/"$@" >> "$@"
+%.8: ../docs/%.md
+	cat "$<" | sed '/^# /d; s/^##/#/' | \
+		pandoc -s -t man \
+			-M "footer:$(RTPENGINE_VERSION)" \
+			-M "date:$(BUILD_DATE)" \
+			-o "$@"
 
-$(DAEMONSRCS) $(HASHSRCS):	$(patsubst %,../daemon/%,$(DAEMONSRCS)) $(patsubst %,../daemon/%,$(HASHSRCS))
-		rm -f "$@"
-		echo '/******** GENERATED FILE ********/' > "$@"
-		cat ../daemon/"$@" >> "$@"
+resample.c ../lib/codeclib.strhash.c mix.c packet.c:	../lib/fix_frame_channel_layout.h
 
-%.8: %.pod
-	pod2man \
-		--center="NGCP rtpengine" \
-		--date="$(RELEASE_DATE)" \
-		--release="$(RTPENGINE_VERSION)" \
-		$< $@
+ifeq ($(with_transcoding),yes)
+../daemon/codec.c codec.c:	../lib/dtmf_rx_fillin.h
+media_player.c ../daemon/media_player.c ../daemon/codec.c codec.c test-resample.c:	../lib/fix_frame_channel_layout.h
+endif
 
-resample.c:	fix_frame_channel_layout.h
+t38.c ../daemon/t38.c:		../lib/spandsp_logging.h
 
 %.strhash.c:	%.c ../utils/const_str_hash
-	../utils/const_str_hash < $< > $@
+	../utils/const_str_hash "$<" $(CFLAGS) < "$<" > "$@"
 
-$(BUILD_TEST_ALTS):	../lib/$(@:.h=-*)
-	echo "Looking for usable alternative for $@"; \
-	rm -f $(@:.h=-test{.c,}); \
-	ln -s ../lib/$(@:.h=-test.c); \
-	for x in ../lib/$(@:.h=-*.h); do \
-		echo "Trying build with $$x"; \
-		rm -f "$@"; \
-		echo '/******** GENERATED FILE ********/' > "$@"; \
-		cat "$$x" >> "$@"; \
-		$(MAKE) $(@:.h=-test) && break; \
-		echo "Failed build with $$x"; \
-		rm -f "$@"; \
-	done; \
-	rm -f $(@:.h=-test{.c,}); \
-	test -f "$@"
+$(BUILD_TEST_ALTS):	$(wildcard $(subst .h,-*,$(BUILD_TEST_ALTS)))
+	../utils/build_test_wrapper "$@"
 
-.PHONY: all debug dep clean install
+.PHONY: all debug clean install

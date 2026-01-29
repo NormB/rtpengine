@@ -49,7 +49,7 @@ sub new {
 	$self->{completed} = 0;
 	$self->{keepalives} = 0;
 
-	$self->debug("created, controll" . ($controlling ? "ing" : "ed")
+	$self->debug("created, control" . ($controlling ? "ing" : "ed")
 		. ", tie breaker " . $self->{tie_breaker}->bstr() . "\n");
 
 	return $self;
@@ -435,8 +435,8 @@ sub do_input {
 
 	if ($response) {
 		# construct and send response packet
-		$self->integrity($response->{attrs}, $response->{mtype}, $tid, $self->{my_pwd});
-		$self->fingerprint($response->{attrs}, $response->{mtype}, $tid);
+		integrity($response->{attrs}, $response->{mtype}, $tid, $self->{my_pwd});
+		fingerprint($response->{attrs}, $response->{mtype}, $tid);
 
 		# XXX unify
 		my $packet = join('', @{$response->{attrs}});
@@ -638,7 +638,7 @@ sub check_to_nominate {
 }
 
 sub integrity {
-	my ($self, $attrs, $mtype, $tid, $pwd) = @_;
+	my ($attrs, $mtype, $tid, $pwd) = @_;
 
 	my $int_check = join('', @$attrs);
 	$int_check = pack('nnNa12', $mtype, length($int_check) + 24, 0x2112A442, $tid) . $int_check;
@@ -647,7 +647,7 @@ sub integrity {
 }
 
 sub fingerprint {
-	my ($self, $attrs, $mtype, $tid) = @_;
+	my ($attrs, $mtype, $tid) = @_;
 
 	my $fp_check = join('', @$attrs);
 	$fp_check = pack('nnNa12', $mtype, length($fp_check) + 8, 0x2112A442, $tid) . $fp_check;
@@ -928,8 +928,8 @@ sub send_check {
 	$self->{nominate} and
 		unshift(@$attrs, NGCP::Rtpclient::ICE::attr(0x0025, ''));
 
-	$self->{agent}->integrity($attrs, 1, $self->{transaction}, $self->{agent}->{other_pwd});
-	$self->{agent}->fingerprint($attrs, 1, $self->{transaction});
+	integrity($attrs, 1, $self->{transaction}, $self->{agent}->{other_pwd});
+	fingerprint($attrs, 1, $self->{transaction});
 
 	my $packet = join('', @$attrs);
 	$packet = pack('nnNa12', 1, length($packet), 0x2112A442, $self->{transaction}) . $packet;

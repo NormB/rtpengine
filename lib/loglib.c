@@ -8,12 +8,15 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <string.h>
+#include <glib/gprintf.h>
 #include "auxlib.h"
+#include "bencode.h"
 
 
 struct log_limiter_entry {
 	char *prefix;
 	char *msg;
+	time_t when;
 };
 
 typedef struct _fac_code {
@@ -27,6 +30,21 @@ static write_log_t log_both;
 
 unsigned int max_log_line_length = 500;
 write_log_t *write_log = (write_log_t *) log_both;
+
+
+
+#define ll(system, descr) #system,
+const char * const log_level_names[] = {
+#include "loglevels.h"
+NULL
+};
+#undef ll
+#define ll(system, descr) descr,
+const char * const log_level_descriptions[] = {
+#include "loglevels.h"
+NULL
+};
+#undef ll
 
 
 
@@ -71,9 +89,9 @@ int ilog_facility = LOG_DAEMON;
 
 
 static GHashTable *__log_limiter;
-static pthread_mutex_t __log_limiter_lock;
-static GStringChunk *__log_limiter_strings;
+static mutex_t __log_limiter_lock = MUTEX_STATIC_INIT;
 static unsigned int __log_limiter_count;
+static bencode_buffer_t __log_limiter_buffer;
 
 
 
@@ -127,9 +145,10 @@ static void log_both(int facility_priority, const char *format, ...) {
 
 
 void __vpilog(int prio, const char *prefix, const char *fmt, va_list ap) {
-	char *msg, *piece;
+	g_autoptr(char) msg = NULL;
+	char *piece;
 	const char *infix = "";
-	int ret, xprio;
+	int len, xprio;
 	const char *prio_prefix;
 
 	xprio = LOG_LEVEL_MASK(prio);
@@ -137,63 +156,77 @@ void __vpilog(int prio, const char *prefix, const char *fmt, va_list ap) {
 	if (!prefix)
 		prefix = "";
 
-	ret = vasprintf(&msg, fmt, ap);
+	len = g_vasprintf(&msg, fmt, ap);
 
-	if (ret < 0) {
-		write_log(LOG_ERROR, "Failed to print syslog message - message dropped");
-		return;
-	}
-
-	while (ret > 0 && msg[ret-1] == '\n')
-		ret--;
+	while (len > 0 && msg[len-1] == '\n')
+		len--;
 
 	if ((prio & LOG_FLAG_LIMIT)) {
-		time_t when;
 		struct log_limiter_entry lle, *llep;
 
 		lle.prefix = (char *) prefix;
 		lle.msg = msg;
 
-		pthread_mutex_lock(&__log_limiter_lock);
+		LOCK(&__log_limiter_lock);
 
 		if (__log_limiter_count > 10000) {
 			g_hash_table_remove_all(__log_limiter);
-			g_string_chunk_clear(__log_limiter_strings);
 			__log_limiter_count = 0;
+			bencode_buffer_free(&__log_limiter_buffer);
+			bencode_buffer_init(&__log_limiter_buffer);
 		}
 
 		time_t now = time(NULL);
 
-		when = (time_t) GPOINTER_TO_UINT(g_hash_table_lookup(__log_limiter, &lle));
-		if (!when || (now - when) >= 15) {
-			lle.prefix = g_string_chunk_insert(__log_limiter_strings, prefix);
-			lle.msg = g_string_chunk_insert(__log_limiter_strings, msg);
-			llep = (void *) g_string_chunk_insert_len(__log_limiter_strings,
-					(void *) &lle, sizeof(lle));
-			g_hash_table_insert(__log_limiter, llep, GUINT_TO_POINTER(now));
-			__log_limiter_count++;
-			when = 0;
+		llep = g_hash_table_lookup(__log_limiter, &lle);
+		if (!llep || (now - llep->when) >= 15) {
+			llep = bencode_buffer_alloc(&__log_limiter_buffer, sizeof(*llep));
+			if (llep) {
+				*llep = (__typeof(*llep)) {
+					.prefix = bencode_strdup(&__log_limiter_buffer, prefix),
+					.msg = bencode_strdup(&__log_limiter_buffer, msg),
+					.when = now,
+				};
+				g_hash_table_insert(__log_limiter, llep, llep);
+				__log_limiter_count++;
+				llep = NULL;
+			}
 		}
 
-		pthread_mutex_unlock(&__log_limiter_lock);
-
-		if (when)
-			goto out;
+		if (llep)
+			return;
 	}
 
 	piece = msg;
 
-	while (max_log_line_length && ret > max_log_line_length) {
-		write_log(xprio, "%s: %s%s%.*s ...", prio_prefix, prefix, infix, max_log_line_length, piece);
-		ret -= max_log_line_length;
-		piece += max_log_line_length;
+	while (1) {
+		unsigned int max_line_len = rtpe_common_config_ptr->max_log_line_length;
+		unsigned int skip_len = max_line_len;
+		if (rtpe_common_config_ptr->split_logs) {
+			char *newline = strchr(piece, '\n');
+			if (newline) {
+				unsigned int nl_pos = newline - piece;
+				if (!max_line_len || nl_pos < max_line_len) {
+					max_line_len = nl_pos;
+					skip_len = nl_pos + 1;
+					if (nl_pos >= 1 && piece[nl_pos-1] == '\r')
+						max_line_len--;
+				}
+			}
+		}
+
+		if (!max_line_len)
+			break;
+		if (len <= max_line_len)
+			break;
+
+		write_log(xprio, "%s: %s%s%.*s ...", prio_prefix, prefix, infix, max_line_len, piece);
+		len -= skip_len;
+		piece += skip_len;
 		infix = "... ";
 	}
 
-	write_log(xprio, "%s: %s%s%.*s", prio_prefix, prefix, infix, ret, piece);
-
-out:
-	free(msg);
+	write_log(xprio, "%s: %s%s%.*s", prio_prefix, prefix, infix, len, piece);
 }
 
 
@@ -222,12 +255,16 @@ static int log_limiter_entry_equal(const void *a, const void *b) {
 }
 
 void log_init(const char *handle) {
-	pthread_mutex_init(&__log_limiter_lock, NULL);
 	__log_limiter = g_hash_table_new(log_limiter_entry_hash, log_limiter_entry_equal);
-	__log_limiter_strings = g_string_chunk_new(1024);
+	bencode_buffer_init(&__log_limiter_buffer);
 
 	if (!rtpe_common_config_ptr->log_stderr)
 		openlog(handle, LOG_PID | LOG_NDELAY, ilog_facility);
+}
+
+void log_free(void) {
+	g_hash_table_destroy(__log_limiter);
+	bencode_buffer_free(&__log_limiter_buffer);
 }
 
 int parse_log_facility(const char *name, int *dst) {
@@ -241,7 +278,7 @@ int parse_log_facility(const char *name, int *dst) {
 	return 0;
 }
 
-void print_available_log_facilities () {
+void print_available_log_facilities(void) {
 	int i;
 
 	fprintf(stderr, "available facilities:");

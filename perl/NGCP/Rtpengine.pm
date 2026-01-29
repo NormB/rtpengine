@@ -8,6 +8,12 @@ use IO::Socket;
 use IO::Socket::IP;
 use Bencode;
 use Data::Dumper;
+use JSON;
+use LWP::UserAgent;
+
+
+our $req_cb;
+
 
 sub new {
 	my ($class, $addr, $port) = @_;
@@ -17,6 +23,9 @@ sub new {
 
 	if (ref($addr)) {
 		$self->{socket} = $addr;
+	}
+	elsif ($addr =~ /^http/) {
+		$self->{uri} = $addr;
 	}
 	else {
 		$self->{socket} = IO::Socket::IP->new(Type => &SOCK_DGRAM, Proto => 'udp',
@@ -30,12 +39,24 @@ sub req {
 	my ($self, $packet) = @_;
 
 	my $cookie = rand() . ' ';
-	my $p = $cookie . Bencode::bencode($packet);
-	$self->{socket}->send($p, 0) or die $!;
+	my $p = $cookie . ($self->{json} ? encode_json($packet) : Bencode::bencode($packet));
 	my $ret;
-	$self->{socket}->recv($ret, 65535) or die $!;
+	if ($self->{uri}) {
+		my $ua = LWP::UserAgent->new();
+		my $resp = $ua->post($self->{uri},
+			'Content-type' => "application/x-rtpengine-ng",
+			Content => $p);
+		$ret = $resp->decoded_content;
+	}
+	else {
+		$self->{socket}->send($p, 0) or die $!;
+		if ($req_cb) {
+			$req_cb->();
+		}
+		$self->{socket}->recv($ret, 65535) or die $!;
+	}
 	$ret =~ s/^\Q$cookie\E//s or die $ret;
-	my $resp = Bencode::bdecode($ret, 1);
+	my $resp = $self->{json} ? decode_json($ret) : Bencode::bdecode($ret, 1);
 
 	$resp->{result} or die Dumper $resp;
 

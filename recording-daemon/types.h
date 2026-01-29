@@ -11,11 +11,12 @@
 #include <libavutil/samplefmt.h>
 #include <libavutil/audio_fifo.h>
 #include <openssl/ssl.h>
-#include <openssl/bio.h>
 #include "str.h"
 #include "codeclib.h"
-#include "poller.h"
+#include "custom_poller.h"
 #include "socket.h"
+#include "containers.h"
+#include "obj.h"
 
 
 struct iphdr;
@@ -25,17 +26,19 @@ struct rtp_header;
 struct streambuf;
 
 
-struct handler_s;
 typedef struct handler_s handler_t;
-struct metafile_s;
 typedef struct metafile_s metafile_t;
-struct output_s;
 typedef struct output_s output_t;
-struct mix_s;
 typedef struct mix_s mix_t;
-struct decode_s;
 typedef struct decode_s decode_t;
-
+typedef struct packet_s packet_t;
+typedef struct stream_s stream_t;
+typedef struct ssrc_s ssrc_t;
+typedef struct sink_s sink_t;
+typedef struct tls_fwd_s tls_fwd_t;
+typedef struct content_s content_t;
+typedef struct notif_action_s notif_action_t;
+typedef struct notif_req_s notif_req_t;
 
 typedef void handler_func(handler_t *);
 
@@ -43,6 +46,28 @@ typedef void handler_func(handler_t *);
 struct handler_s {
 	handler_func *func;
 	void *ptr;
+};
+
+
+struct sink_s {
+	bool (*add)(sink_t *, AVFrame *);
+	bool (*config)(sink_t *, const format_t *requested_format, format_t *actual_format);
+
+	union {
+		output_t *output;
+		ssrc_t *ssrc;
+		tls_fwd_t **tls_fwd;
+	};
+	union {
+		mix_t **mix;
+	};
+
+	resample_t resampler;
+	format_t format;
+
+	union {
+		unsigned int mixer_idx;
+	};
 };
 
 
@@ -54,9 +79,11 @@ struct stream_s {
 	unsigned long tag;
 	int fd;
 	handler_t handler;
-	int forwarding_on:1;
+	unsigned int forwarding_on:1;
+	int64_t start_time_us;
+	unsigned int media_sdp_id;
+	unsigned int channel_slot;
 };
-typedef struct stream_s stream_t;
 
 
 struct packet_s {
@@ -70,7 +97,22 @@ struct packet_s {
 	str payload;
 
 };
-typedef struct packet_s packet_t;
+
+
+struct tls_fwd_s {
+	sink_t sink;
+	format_t format;
+	socket_t sock;
+	uint64_t in_pts;
+	AVFrame *silence_frame;
+	SSL_CTX *ssl_ctx;
+	SSL *ssl;
+	struct streambuf *stream;
+	struct poller poller;
+	ssrc_t *ssrc;
+	metafile_t *metafile;
+	unsigned int sent_intro:1;
+};
 
 
 struct ssrc_s {
@@ -81,27 +123,24 @@ struct ssrc_s {
 	packet_sequencer_t sequencer;
 	decode_t *decoders[128];
 	output_t *output;
-
-	// TLS output
-	format_t tls_fwd_format;
-	resample_t tls_fwd_resampler;
-	socket_t tls_fwd_sock;
-	//BIO *bio;
-	SSL_CTX *ssl_ctx;
-	SSL *ssl;
-	struct streambuf *tls_fwd_stream;
-	struct poller tls_fwd_poller;
-	int sent_intro:1;
+	tls_fwd_t *tls_fwd;
 };
-typedef struct ssrc_s ssrc_t;
 
 
 struct tag_s {
 	unsigned long id;
 	char *name;
 	char *label;
+	char *metadata;
 };
 typedef struct tag_s tag_t;
+
+
+INLINE void allocd_str_q_free(str_q *q) {
+	t_queue_clear_full(q, str_free);
+	t_queue_free(q);
+}
+TYPED_GHASHTABLE(metadata_ht, str, str_q, str_hash, str_equal, str_free, allocd_str_q_free)
 
 
 struct metafile_s {
@@ -109,10 +148,17 @@ struct metafile_s {
 	char *name;
 	char *parent;
 	char *call_id;
+	char *random_tag;
 	char *metadata;
-	char *metadata_db;
+	metadata_ht metadata_parsed;
+	char *output_dest;
+	char *output_path;
+	char *output_pattern;
 	off_t pos;
 	unsigned long long db_id;
+	unsigned int db_streams;
+	int64_t start_time_us;
+	unsigned int media_rec_slots;
 
 	GStringChunk *gsc; // XXX limit max size
 
@@ -124,46 +170,113 @@ struct metafile_s {
 	mix_t *mix;
 	output_t *mix_out;
 
+	mix_t *tls_mix;
+	tls_fwd_t *mix_tls_fwd;
+
 	int forward_fd;
-	volatile gint forward_count;
-	volatile gint forward_failed;
+	int forward_count;
+	int forward_failed;
 
 	pthread_mutex_t payloads_lock;
 	char *payload_types[128];
+	char *payload_formats[128];
 	int payload_ptimes[128];
 	int media_ptimes[4];
 
-	int recording_on:1;
-	int forwarding_on:1;
+	unsigned int recording_on:1;
+	unsigned int forwarding_on:1;
+	unsigned int discard:1;
+	unsigned int db_metadata_done:1;
+	unsigned int skip_db:1;
+	unsigned int started:1;
 };
 
 
 struct output_s {
-	char full_filename[PATH_MAX], // path + filename
-		file_path[PATH_MAX],
-		file_name[PATH_MAX];
+	sink_t sink;
+
+	char *full_filename, // path + filename
+		*file_path,
+		*file_name,
+		*filename; // path + filename + suffix
 	const char *file_format;
+	const char *kind; // "mixed" or "single"
 	unsigned long long db_id;
+	gboolean skip_filename_extension;
+	int64_t start_time_us;
 
-//	format_t requested_format,
-//		 actual_format;
-
-//	AVCodecContext *avcctx;
+	FILE *fp;
+	char *iobuf;
+	GString *membuf;
+	size_t mempos;
+	AVIOContext *avioctx;
 	AVFormatContext *fmtctx;
 	AVStream *avst;
-//	AVPacket avpkt;
-//	AVAudioFifo *fifo;
-//	int64_t fifo_pts; // pts of first data in fifo
-//	int64_t mux_dts; // last dts passed to muxer
-//	AVFrame *frame;
 	encoder_t *encoder;
+	format_t requested_format,
+		 actual_format;
+
+	content_t *content;
 };
 
 
 struct decode_s {
 	decoder_t *dec;
-	resample_t mix_resampler;
-	unsigned int mixer_idx;
+	sink_t mix_sink;
+	sink_t tls_mix_sink;
+};
+
+struct content_s {
+	struct obj obj;
+	GString *s;
+
+	char *name;
+	unsigned int failed;
+};
+
+struct notif_action_s {
+	const char *name;
+	void (*setup)(notif_req_t *, output_t *o, metafile_t *mf, tag_t *tag);
+	bool (*perform)(notif_req_t *);
+	void (*failed)(notif_req_t *);
+	void (*cleanup)(notif_req_t *);
+};
+
+struct notif_req_s {
+	char *name; // just for logging
+
+	union {
+		// generic HTTP req
+		struct {
+			struct curl_slist *headers;
+		};
+
+		// notify command
+		struct {
+			char **argv;
+		};
+
+		// db writer
+		struct {
+			int64_t end_time;
+		};
+
+		// S3
+		struct {
+			GString *content_sha256;
+		};
+	};
+
+	// used by multiple actions
+	unsigned long long db_id;
+	content_t *content;
+	char *object_name;
+
+	const notif_action_t *action;
+
+	int64_t retry_time;
+	unsigned int retries;
+	int64_t falloff_us;
 };
 
 

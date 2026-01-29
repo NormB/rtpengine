@@ -5,16 +5,3 @@ rtpengine
 core
 core.*
 .ycm_extra_conf.pyc
-auxlib.c
-loglib.c
-rtplib.c
-codeclib.c
-resample.c
-str.c
-fix_frame_channel_layout.h
-socket.c
-streambuf.c
-ssllib.c
-dtmflib.c
-*-test
-dtmf_rx_fillin.h

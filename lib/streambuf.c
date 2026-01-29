@@ -8,7 +8,11 @@
 #include <stdarg.h>
 #include <time.h>
 
+#ifndef CUSTOM_POLLER
 #include "poller.h"
+#else
+#include "custom_poller.h"
+#endif
 #include "auxlib.h"
 
 
@@ -32,13 +36,13 @@ static ssize_t __fd_read(void *fd, void *b, size_t s) {
 struct streambuf *streambuf_new_ptr(struct poller *p, void *fd_ptr, const struct streambuf_funcs *funcs) {
 	struct streambuf *b;
 
-	b = g_slice_alloc0(sizeof(*b));
+	b = g_new0(__typeof(*b), 1);
 
 	mutex_init(&b->lock);
 	b->buf = g_string_new("");
 	b->fd_ptr = fd_ptr;
 	b->poller = p;
-	b->active = rtpe_now.tv_sec;
+	b->active_us = rtpe_now;
 	b->funcs = funcs;
 
 	return b;
@@ -50,7 +54,7 @@ struct streambuf *streambuf_new(struct poller *p, int fd) {
 
 void streambuf_destroy(struct streambuf *b) {
 	g_string_free(b->buf, TRUE);
-	g_slice_free1(sizeof(*b), b);
+	g_free(b);
 }
 
 
@@ -79,11 +83,11 @@ int streambuf_writeable(struct streambuf *b) {
 
 		if (ret > 0) {
 			g_string_erase(b->buf, 0, ret);
-			b->active = rtpe_now.tv_sec;
+			b->active_us = rtpe_now;
 		}
 
 		if (ret != out) {
-			poller_blocked(b->poller, b->fd_ptr);
+			rtpe_poller_blocked(b->poller, b->fd_ptr);
 			break;
 		}
 	}
@@ -118,7 +122,7 @@ int streambuf_readable(struct streambuf *b) {
 		}
 
 		g_string_append_len(b->buf, buf, ret);
-		b->active = rtpe_now.tv_sec;
+		b->active_us = rtpe_now;
 	}
 
 	mutex_unlock(&b->lock);
@@ -177,27 +181,32 @@ char *streambuf_getline(struct streambuf *b) {
 	return s;
 }
 
-unsigned int streambuf_bufsize(struct streambuf *b) {
+size_t streambuf_bufsize(struct streambuf *b) {
 	return b->buf->len;
 }
 
 
-void streambuf_vprintf(struct streambuf *b, const char *f, va_list va) {
+size_t streambuf_vprintf(struct streambuf *b, const char *f, va_list va) {
 	GString *gs;
 
 	gs = g_string_new("");
 	g_string_vprintf(gs, f, va);
 
+	size_t ret = gs->len;
 	streambuf_write(b, gs->str, gs->len);
 	g_string_free(gs, TRUE);
+
+	return ret;
 }
 
-void streambuf_printf(struct streambuf *b, const char *f, ...) {
+size_t streambuf_printf(struct streambuf *b, const char *f, ...) {
 	va_list va;
 
 	va_start(va, f);
-	streambuf_vprintf(b, f, va);
+	size_t ret = streambuf_vprintf(b, f, va);
 	va_end(va);
+
+	return ret;
 }
 
 void streambuf_write(struct streambuf *b, const char *s, unsigned int len) {
@@ -209,7 +218,7 @@ void streambuf_write(struct streambuf *b, const char *s, unsigned int len) {
 
 	mutex_lock(&b->lock);
 
-	while (len && !poller_isblocked(b->poller, b->fd_ptr)) {
+	while (len && !rtpe_poller_isblocked(b->poller, b->fd_ptr)) {
 		out = (len > 1024) ? 1024 : len;
 		ret = b->funcs->write(b->fd_ptr, s, out);
 
@@ -217,10 +226,10 @@ void streambuf_write(struct streambuf *b, const char *s, unsigned int len) {
 			if (errno == EINTR)
 				continue;
 			if (errno != EAGAIN && errno != EWOULDBLOCK) {
-				poller_error(b->poller, b->fd_ptr);
+				rtpe_poller_error(b->poller, b->fd_ptr);
 				break;
 			}
-			poller_blocked(b->poller, b->fd_ptr);
+			rtpe_poller_blocked(b->poller, b->fd_ptr);
 			break;
 		}
 		if (ret == 0)
@@ -228,11 +237,11 @@ void streambuf_write(struct streambuf *b, const char *s, unsigned int len) {
 
 		s += ret;
 		len -= ret;
-		b->active = rtpe_now.tv_sec;
+		b->active_us = rtpe_now;
 	}
 
 	if (b->buf->len > 5242880)
-		poller_error(b->poller, b->fd_ptr);
+		rtpe_poller_error(b->poller, b->fd_ptr);
 	else if (len)
 		g_string_append_len(b->buf, s, len);
 
