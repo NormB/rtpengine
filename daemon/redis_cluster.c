@@ -185,25 +185,14 @@ static int redis_cluster_check_conn(struct redis *r) {
 		return REDIS_STATE_DISCONNECTED;
 	}
 
+	/* hiredis-cluster can leave cc->err set after transient issues
+	 * (e.g. slot redirect on PUBLISH). Clear stale errors — the
+	 * actual SET/DEL will fail with a meaningful error if the
+	 * connection is really broken. */
 	if (cc->err) {
-		rlog(LOG_WARN, "Redis Cluster connection error: %s", cc->errstr);
-		r->state = REDIS_STATE_DISCONNECTED;
-		return REDIS_STATE_DISCONNECTED;
-	}
-
-	/* Quick connectivity check via first node PING */
-	redisClusterNodeIterator ni;
-	redisClusterInitNodeIterator(&ni, cc);
-	redisClusterNode *node = redisClusterNodeNext(&ni);
-	if (node) {
-		redisReply *rp = redisClusterCommandToNode(cc, node, "PING");
-		if (!rp || rp->type == REDIS_REPLY_ERROR) {
-			if (rp) freeReplyObject(rp);
-			rlog(LOG_WARN, "Redis Cluster PING failed");
-			r->state = REDIS_STATE_DISCONNECTED;
-			return REDIS_STATE_DISCONNECTED;
-		}
-		freeReplyObject(rp);
+		rlog(LOG_DEBUG, "Redis Cluster clearing stale error: %s", cc->errstr);
+		cc->err = 0;
+		cc->errstr[0] = '\0';
 	}
 
 	r->state = REDIS_STATE_CONNECTED;
@@ -258,11 +247,23 @@ void redis_cluster_update_onekey(call_t *c, struct redis *r) {
 	}
 	freeReplyObject(rp);
 
-	/* PUBLISH notification for HA peers */
-	g_autofree char *channel = redis_cluster_notify_channel(r->db);
-	g_autofree char *msg = g_strdup_printf("set " STR_FORMAT, STR_FMT(&c->callid));
-	rp = redisClusterCommand(cc, "PUBLISH %s %s", channel, msg);
-	if (rp) freeReplyObject(rp);
+	/* PUBLISH notification for HA peers.
+	 * PUBLISH is not natively routed by hiredis-cluster (it doesn't
+	 * recognize it as a key-bearing command), so we target any node
+	 * directly. In Redis Cluster, PUBLISH is broadcast to all nodes. */
+	{
+		redisClusterNodeIterator ni;
+		redisClusterInitNodeIterator(&ni, cc);
+		redisClusterNode *node = redisClusterNodeNext(&ni);
+		if (node) {
+			g_autofree char *channel = redis_cluster_notify_channel(r->db);
+			g_autofree char *notify_msg = g_strdup_printf("set " STR_FORMAT,
+					STR_FMT(&c->callid));
+			rp = redisClusterCommandToNode(cc, node, "PUBLISH %s %s",
+					channel, notify_msg);
+			if (rp) freeReplyObject(rp);
+		}
+	}
 
 	rwlock_unlock_r(&c->master_lock);
 	g_free(to_free);
@@ -304,10 +305,19 @@ void redis_cluster_do_delete(call_t *c, struct redis *r) {
 	if (rp) freeReplyObject(rp);
 
 	/* PUBLISH DEL notification for HA peers */
-	g_autofree char *channel = redis_cluster_notify_channel(c->redis_hosted_db);
-	g_autofree char *msg = g_strdup_printf("del " STR_FORMAT, STR_FMT(&c->callid));
-	rp = redisClusterCommand(cc, "PUBLISH %s %s", channel, msg);
-	if (rp) freeReplyObject(rp);
+	{
+		redisClusterNodeIterator ni;
+		redisClusterInitNodeIterator(&ni, cc);
+		redisClusterNode *node = redisClusterNodeNext(&ni);
+		if (node) {
+			g_autofree char *channel = redis_cluster_notify_channel(c->redis_hosted_db);
+			g_autofree char *notify_msg = g_strdup_printf("del " STR_FORMAT,
+					STR_FMT(&c->callid));
+			rp = redisClusterCommandToNode(cc, node, "PUBLISH %s %s",
+					channel, notify_msg);
+			if (rp) freeReplyObject(rp);
+		}
+	}
 
 	rwlock_unlock_r(&c->master_lock);
 }
@@ -585,7 +595,7 @@ static void on_cluster_notification(redisAsyncContext *actx, void *reply, void *
 				call_destroy(c);
 				release_closed_sockets();
 			} else {
-				rlog(LOG_WARN, "Redis Cluster notify: ignoring SET for OWN call "
+				rlog(LOG_DEBUG, "Redis Cluster notify: ignoring SET for OWN call "
 						STR_FORMAT, STR_FMT(&callid));
 				goto out;
 			}
@@ -607,7 +617,7 @@ static void on_cluster_notification(redisAsyncContext *actx, void *reply, void *
 		}
 		rwlock_unlock_w(&c->master_lock);
 		if (!IS_FOREIGN_CALL(c)) {
-			rlog(LOG_WARN, "Redis Cluster notify: ignoring DEL for OWN call "
+			rlog(LOG_DEBUG, "Redis Cluster notify: ignoring DEL for OWN call "
 					STR_FORMAT, STR_FMT(&callid));
 			goto out;
 		}
