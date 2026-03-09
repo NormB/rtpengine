@@ -52,6 +52,8 @@ enum endpoint_learning {
 	X(redis_db) \
 	X(redis_write_db) \
 	X(redis_subscribe_db) \
+	X(redis_cluster_db) \
+	X(redis_cluster_write_db) \
 	X(redis_allowed_errors) \
 	X(redis_cmd_timeout) \
 	X(redis_connect_timeout) \
@@ -176,6 +178,8 @@ enum endpoint_learning {
 	X(mqtt_publish_topic) \
 	X(janus_secret) \
 	X(db_media_cache) \
+	X(redis_cluster_nodes) \
+	X(redis_cluster_write_nodes) \
 
 #define RTPE_CONFIG_ENDPOINT_PARAMS \
 	X(graphite_ep) \

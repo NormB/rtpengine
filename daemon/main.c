@@ -33,6 +33,7 @@
 #include "call.h"
 #include "kernel.h"
 #include "redis.h"
+#include "redis_cluster.h"
 #include "sdp.h"
 #include "dtls.h"
 #include "call_interfaces.h"
@@ -103,6 +104,8 @@ struct rtpengine_config rtpe_config = {
 	.port_max = 39999,
 	.redis_db = -1,
 	.redis_write_db = -1,
+	.redis_cluster_db = -1,
+	.redis_cluster_write_db = -1,
 	.redis_allowed_errors = -1,
 	.redis_connect_timeout = 1000,
 	.media_num_threads = -1,
@@ -639,6 +642,8 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 	g_autoptr(char) redisps = NULL;
 	g_autoptr(char) redisps_write = NULL;
 	g_autoptr(char) redisps_subscribe = NULL;
+	g_autoptr(char) redis_cluster_str = NULL;
+	g_autoptr(char) redis_cluster_write_str = NULL;
 	g_autoptr(char) log_facility_cdr_s = NULL;
 	g_autoptr(char) log_facility_rtcp_s = NULL;
 	g_autoptr(char) log_facility_dtmf_s = NULL;
@@ -743,6 +748,10 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		{ "redis-tcp-keepalive-intvl",0,0,G_OPTION_ARG_INT,&rtpe_config.redis_tcp_keepalive_intvl,"Set tcp_keepalive_intvl for redis connections", "INT" },
 		{ "redis-tcp-keepalive-probes",0,0,G_OPTION_ARG_INT,&rtpe_config.redis_tcp_keepalive_probes,"Set tcp_keepalive_probes for redis connections", "INT" },
 
+		{ "redis-cluster", 0, 0, G_OPTION_ARG_STRING, &redis_cluster_str,
+			"Connect to Redis Cluster", "[PW@]IP:PORT,IP:PORT,.../INT" },
+		{ "redis-cluster-write", 0, 0, G_OPTION_ARG_STRING, &redis_cluster_write_str,
+			"Connect to Redis Cluster for writes", "[PW@]IP:PORT,IP:PORT,.../INT" },
 #if 0
 		// temporarily disabled, see discussion on https://github.com/sipwise/rtpengine/commit/2ebf5a1526c1ce8093b3011a1e23c333b3f99400
 		// related to Change-Id: I83d9b9a844f4f494ad37b44f5d1312f272beff3f
@@ -1053,6 +1062,44 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 				g_queue_push_tail(&rtpe_config.redis_subscribed_keyspaces, GINT_TO_POINTER(int_keyspace_db));
 			}
 		}
+	}
+
+
+	/* Redis Cluster endpoint parsing */
+	if (redis_cluster_str) {
+		char *sl = strrchr(redis_cluster_str, '@');
+		const char *nodes_start = redis_cluster_str;
+		if (sl) {
+			*sl = 0;
+			rtpe_config.redis_auth = g_strdup(redis_cluster_str);
+			nodes_start = sl + 1;
+		}
+		char *db_sep = strrchr((char *)nodes_start, '/');
+		if (!db_sep)
+			die("Invalid --redis-cluster format, missing /INT suffix: '%s'",
+					redis_cluster_str);
+		*db_sep = 0;
+		rtpe_config.redis_cluster_db = atoi(db_sep + 1);
+		rtpe_config.redis_cluster_nodes = g_strdup(nodes_start);
+		rtpe_config.redis_db = rtpe_config.redis_cluster_db; /* for HA compat */
+	}
+
+	if (redis_cluster_write_str) {
+		char *sl = strrchr(redis_cluster_write_str, '@');
+		const char *nodes_start = redis_cluster_write_str;
+		if (sl) {
+			*sl = 0;
+			rtpe_config.redis_write_auth = g_strdup(redis_cluster_write_str);
+			nodes_start = sl + 1;
+		}
+		char *db_sep = strrchr((char *)nodes_start, '/');
+		if (!db_sep)
+			die("Invalid --redis-cluster-write format, missing /INT suffix: '%s'",
+					redis_cluster_write_str);
+		*db_sep = 0;
+		rtpe_config.redis_cluster_write_db = atoi(db_sep + 1);
+		rtpe_config.redis_cluster_write_nodes = g_strdup(nodes_start);
+		rtpe_config.redis_write_db = rtpe_config.redis_cluster_write_db;
 	}
 
 	if (redis_format) {
@@ -1710,6 +1757,39 @@ static void create_everything(void) {
 	create_listeners(&rtpe_config.ng_tcp_listen_ep,  &rtpe_control_ng_tcp, (void *(*)(const endpoint_t *)) control_ng_tcp_new, false, "TCP NG control");
 	create_listeners(&rtpe_config.cli_listen_ep,     &rtpe_cli,            (void *(*)(const endpoint_t *)) cli_new,            false, "CLI");
 
+#ifdef HAVE_HIREDIS_CLUSTER
+	/* Redis Cluster init — takes precedence over standalone if configured */
+	if (rtpe_config.redis_cluster_nodes) {
+		rtpe_redis = redis_cluster_new(
+				rtpe_config.redis_cluster_nodes,
+				rtpe_config.redis_cluster_db,
+				rtpe_config.redis_auth,
+				rtpe_config.no_redis_required);
+		if (!rtpe_redis && !rtpe_config.no_redis_required)
+			die("Cannot start without Redis Cluster connection! "
+					"See also NO_REDIS_REQUIRED parameter.");
+
+		if (rtpe_config.redis_cluster_write_nodes) {
+			rtpe_redis_write = redis_cluster_new(
+					rtpe_config.redis_cluster_write_nodes,
+					rtpe_config.redis_cluster_write_db,
+					rtpe_config.redis_write_auth,
+					rtpe_config.no_redis_required);
+			if (!rtpe_redis_write && !rtpe_config.no_redis_required)
+				die("Cannot start without Redis Cluster write connection!");
+		}
+
+		if (!rtpe_redis_write)
+			rtpe_redis_write = rtpe_redis;
+
+		/* For cluster HA notifications, reuse the read connection */
+		if (rtpe_config.redis_subscribed_keyspaces.length)
+			rtpe_redis_notify = rtpe_redis;
+
+		goto redis_init_done;
+	}
+#endif
+
 	if (!is_addr_unspecified(&rtpe_config.redis_write_ep.address)) {
 		rtpe_redis_write = redis_new(&rtpe_config.redis_write_ep,
 				rtpe_config.redis_write_db,
@@ -1774,6 +1854,10 @@ static void create_everything(void) {
 		if (!rtpe_redis_write)
 			rtpe_redis_write = rtpe_redis;
 	}
+
+#ifdef HAVE_HIREDIS_CLUSTER
+redis_init_done:
+#endif
 
 	daemonize();
 	wpidfile();
@@ -2018,7 +2102,8 @@ int main(int argc, char **argv) {
 	redis_close(rtpe_redis);
 	if (rtpe_redis_write != rtpe_redis)
 		redis_close(rtpe_redis_write);
-	redis_close(rtpe_redis_notify);
+	if (rtpe_redis_notify && rtpe_redis_notify != rtpe_redis && rtpe_redis_notify != rtpe_redis_write)
+		redis_close(rtpe_redis_notify);
 
 	free_prefix();
 	log_free();

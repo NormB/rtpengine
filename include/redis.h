@@ -65,6 +65,10 @@ struct redis {
 	int64_t				async_last;
 
 	bool		update_resolve;
+
+	/* Redis Cluster support (--redis-cluster) */
+	bool		is_cluster;
+	void		*cluster_ctx; /* redisClusterContext* — typed void to avoid header dep */
 };
 
 struct redis_hash {

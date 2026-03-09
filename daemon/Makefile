@@ -84,12 +84,22 @@ endif
 CFLAGS+=	$(CFLAGS_MQTT)
 LDLIBS+=	$(LDLIBS_MQTT)
 
+# hiredis-cluster (optional, for Redis Cluster support)
+HAVE_HIREDIS_CLUSTER := $(shell pkg-config --exists hiredis_cluster 2>/dev/null && echo yes)
+ifeq ($(HAVE_HIREDIS_CLUSTER),yes)
+CFLAGS+=	$(shell pkg-config --cflags hiredis_cluster) -DHAVE_HIREDIS_CLUSTER
+LDLIBS+=	$(shell pkg-config --libs hiredis_cluster)
+endif
+
 SRCS=		main.c kernel.c helpers.c control_tcp.c call.c control_udp.c redis.c \
 		cookie_cache.c udp_listener.c control_ng_flags_parser.c control_ng.strhash.c sdp.strhash.c stun.c rtcp.c \
 		crypto.c rtp.c call_interfaces.strhash.c dtls.c log.c cli.strhash.c graphite.c ice.c \
 		media_socket.c homer.c recording.c statistics.c cdr.c ssrc.c iptables.c tcp_listener.c \
 		codec.c load.c dtmf.c timerthread.c media_player.c jitter_buffer.c t38.c websocket.c \
 		mqtt.c janus.strhash.c audio_player.c arena.c ng_client.c
+ifeq ($(HAVE_HIREDIS_CLUSTER),yes)
+SRCS+=		redis_cluster.c
+endif
 ifneq ($(without_nftables),yes)
 SRCS+=		nftables.c
 endif

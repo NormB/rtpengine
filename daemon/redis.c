@@ -1,4 +1,5 @@
 #include "redis.h"
+#include "redis_cluster.h"
 #include <stdio.h>
 #include <hiredis/hiredis.h>
 #include <sys/types.h>
@@ -51,7 +52,7 @@ struct redis		*rtpe_redis_notify;
 
 
 static __thread const ng_parser_t *redis_parser = &ng_parser_json;
-static const ng_parser_t *const redis_format_parsers[__REDIS_FORMAT_MAX] = {
+const ng_parser_t *const redis_format_parsers[__REDIS_FORMAT_MAX] = {
 	&ng_parser_native,
 	&ng_parser_json,
 };
@@ -115,7 +116,7 @@ static cond_t redis_ports_release_cond = COND_STATIC_INIT;
 static int redis_ports_release_balance = 0; // negative = releasers, positive = allocators
 
 static int redis_check_conn(struct redis *r);
-static void json_restore_call(struct redis *r, const str *id, bool foreign);
+void json_restore_call(struct redis *r, const str *id, bool foreign);
 static int redis_connect(struct redis *r, int wait, bool resolve);
 static int json_build_ssrc(struct call_media *, parser_arg arg);
 
@@ -607,9 +608,14 @@ int redis_async_event_base_action(struct redis *r, enum event_base_action action
 	if (!r) {
 		rlog(LOG_ERR, "redis_async_event_base_action: NULL r");
 		return -1;
-	} else {
-		rlog(LOG_DEBUG, "redis_async_event_base_action: Use Redis %s", endpoint_print_buf(&r->endpoint));
 	}
+
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (r->is_cluster)
+		return redis_cluster_async_event_base_action(r, action);
+#endif
+
+	rlog(LOG_DEBUG, "redis_async_event_base_action: Use Redis %s", endpoint_print_buf(&r->endpoint));
 
 	if (!r->async_ev && action != EVENT_BASE_ALLOC) {
 		rlog(LOG_NOTICE, "redis_async_event_base_action: async_ev is NULL on event base action %d", action);
@@ -817,6 +823,13 @@ static int redis_notify(struct redis *r) {
 }
 
 void redis_delete_async_loop(void *d) {
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (rtpe_redis_write && rtpe_redis_write->is_cluster) {
+		redis_cluster_delete_async_loop(d);
+		return;
+	}
+#endif
+
 	struct redis *r = NULL;
 
 	// sanity checks
@@ -848,6 +861,13 @@ void redis_delete_async_loop(void *d) {
 }
 
 void redis_notify_loop(void *d) {
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (rtpe_redis_notify && rtpe_redis_notify->is_cluster) {
+		redis_cluster_notify_loop(d);
+		return;
+	}
+#endif
+
 	int redis_notify_return = 0;
 	const int64_t microseconds = 1000000L;
 	int64_t next_run = rtpe_now;
@@ -964,6 +984,12 @@ struct redis *redis_dup(const struct redis *r, int db) {
 void redis_close(struct redis *r) {
 	if (!r)
 		return;
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (r->is_cluster) {
+		redis_cluster_close(r);
+		return;
+	}
+#endif
 	if (r->ctx)
 		redisFree(r->ctx);
 	r->ctx = NULL;
@@ -2070,7 +2096,7 @@ static int json_build_ssrc(struct call_media *md, parser_arg arg) {
 	return 0;
 }
 
-static void json_restore_call(struct redis *r, const str *callid, bool foreign) {
+void json_restore_call(struct redis *r, const str *callid, bool foreign) {
 	redisReply* rr_jsonStr;
 	struct redis_hash call;
 	struct redis_list tags, sfds, streams, medias, maps;
@@ -2087,7 +2113,19 @@ static void json_restore_call(struct redis *r, const str *callid, bool foreign) 
 	bencode_buffer_t buf = {0};
 
 	mutex_lock(&r->lock);
-	rr_jsonStr = redis_get(r, REDIS_REPLY_STRING, "GET " PB, PBSTR(callid));
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (r->is_cluster && r->cluster_ctx) {
+		g_autofree char *ckey = redis_cluster_key(r->db, callid);
+		rr_jsonStr = redisClusterCommand(r->cluster_ctx, "GET %s", ckey);
+		if (rr_jsonStr && rr_jsonStr->type != REDIS_REPLY_STRING) {
+			freeReplyObject(rr_jsonStr);
+			rr_jsonStr = NULL;
+		}
+	} else
+#endif
+	{
+		rr_jsonStr = redis_get(r, REDIS_REPLY_STRING, "GET " PB, PBSTR(callid));
+	}
 	mutex_unlock(&r->lock);
 
 	bool must_release_pop = true;
@@ -2287,17 +2325,29 @@ err1:
 			redis_ports_release_pop(false);
 		must_release_pop = false;
 
-		mutex_lock(&rtpe_redis_write->lock);
+		if (rtpe_redis_write) {
+#ifdef HAVE_HIREDIS_CLUSTER
+			if (rtpe_redis_write->is_cluster && rtpe_redis_write->cluster_ctx) {
+				g_autofree char *ckey = redis_cluster_key(r->db, callid);
+				mutex_lock(&rtpe_redis_write->lock);
+				redisReply *drp = redisClusterCommand(
+						rtpe_redis_write->cluster_ctx, "DEL %s", ckey);
+				if (drp) freeReplyObject(drp);
+				mutex_unlock(&rtpe_redis_write->lock);
+			} else
+#endif
+			{
+				mutex_lock(&rtpe_redis_write->lock);
+				redis_select_db(rtpe_redis_write, rtpe_redis_write->db);
+				redisCommandNR(rtpe_redis_write->ctx, "DEL " PB, PBSTR(callid));
+				mutex_unlock(&rtpe_redis_write->lock);
 
-		redis_select_db(rtpe_redis_write, rtpe_redis_write->db);
-
-		redisCommandNR(rtpe_redis_write->ctx, "DEL " PB, PBSTR(callid));
-		mutex_unlock(&rtpe_redis_write->lock);
-
-		if (rtpe_redis_notify) {
-			mutex_lock(&rtpe_redis_notify->lock);
-			redisCommandNR(rtpe_redis_notify->ctx, "DEL " PB, PBSTR(callid));
-			mutex_unlock(&rtpe_redis_notify->lock);
+				if (rtpe_redis_notify) {
+					mutex_lock(&rtpe_redis_notify->lock);
+					redisCommandNR(rtpe_redis_notify->ctx, "DEL " PB, PBSTR(callid));
+					mutex_unlock(&rtpe_redis_notify->lock);
+				}
+			}
 		}
 	}
 	if (c)
@@ -2343,6 +2393,11 @@ int redis_restore(struct redis *r, bool foreign, int db) {
 
 	if (!r)
 		return 0;
+
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (r->is_cluster)
+		return redis_cluster_restore(r, foreign, db);
+#endif
 
 	for (unsigned int i = 0; i < num_log_levels; i++)
 		rtpe_config.common.log_levels[i] |= LOG_FLAG_RESTORE;
@@ -2513,7 +2568,7 @@ static void json_update_dtls_fingerprint(const ng_parser_t *parser, parser_arg i
  * encodes the few (k,v) pairs for one call under one json structure
  */
 
-static str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free) {
+str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free) {
 
 	char tmp[128];
 	const ng_parser_t *parser = ctx->parser;
@@ -2841,6 +2896,13 @@ void redis_update_onekey(call_t *c, struct redis *r) {
 	if (IS_FOREIGN_CALL(c))
 		return;
 
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (r->is_cluster) {
+		redis_cluster_update_onekey(c, r);
+		return;
+	}
+#endif
+
 	LOCK(&r->lock);
 	// coverity[sleep : FALSE]
 	if (redis_check_conn(r) == REDIS_STATE_DISCONNECTED)
@@ -2897,6 +2959,13 @@ static void redis_do_delete(call_t *c, struct redis *r) {
 	if (c->redis_hosted_db < 0)
 		return;
 
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (r->is_cluster) {
+		redis_cluster_do_delete(c, r);
+		return;
+	}
+#endif
+
 	if (delete_async) {
 		LOCK(&r->async_lock);
 		rwlock_lock_r(&c->master_lock);
@@ -2943,6 +3012,13 @@ void redis_delete(call_t *c, struct redis *r) {
 void redis_wipe(struct redis *r) {
 	if (!r)
 		return;
+
+#ifdef HAVE_HIREDIS_CLUSTER
+	if (r->is_cluster) {
+		redis_cluster_wipe(r);
+		return;
+	}
+#endif
 
 	LOCK(&r->lock);
 	// coverity[sleep : FALSE]
