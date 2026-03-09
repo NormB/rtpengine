@@ -828,8 +828,7 @@ static void media_player_cache_entry_decoder_thread(struct media_player_cache_en
 	entry->finished = true;
 	cond_broadcast(&entry->cond);
 
-	media_player_ht_iter iter;
-	t_hash_table_iter_init(&iter, entry->wait_queue);
+	__auto_type iter = t_hash_table_iter(entry->wait_queue);
 	struct media_player *mp;
 	while (t_hash_table_iter_next(&iter, &mp, NULL)) {
 		if (mp->media)
@@ -912,6 +911,12 @@ static bool media_player_cache_entry_init(struct media_player *mp, const rtp_pay
 	entry->call_ref = obj_get(mp->call); // hold reference until decoding is finished, as blob is owned by call
 
 	entry->coder.handler->packet_encoded = media_player_packet_cache;
+
+	call_memory_arena_release();
+	memory_arena = &entry->arena;
+	codec_init_payload_type(&entry->coder.handler->source_pt, MT_UNKNOWN);
+	codec_init_payload_type(&entry->coder.handler->dest_pt, MT_UNKNOWN);
+	call_memory_arena_set(mp->call);
 
 	// use low priority (10 nice)
 	thread_create_detach_prio(media_player_cache_entry_decoder_thread, obj_get(entry), NULL, 10, "mp decoder");
@@ -1281,7 +1286,7 @@ static struct media_player_media_file *media_player_media_file_new(str blob) {
 	__auto_type fo = obj_alloc0(struct media_player_media_file,
 			media_player_media_file_free);
 	fo->blob = blob;
-	fo->blob.dup = call_ref; // string is allocated by reference on `fo`
+	fo->blob.arena = memory_arena; // string is allocated by reference on `fo`
 	RTPE_GAUGE_ADD(media_cache, blob.len);
 	fo->atime_us = fo->mtime_us = rtpe_now;
 	return fo;
@@ -1596,7 +1601,7 @@ check_next:
 			bf_set(&media->media_flags, MEDIA_FLAG_FAKE_SENDRECV);
 
 			if (media->media_subscriptions.head) {
-				__auto_type sub = media->media_subscriptions.head->data;
+				__auto_type sub = media->media_subscriptions.head;
 				__auto_type sub_m = sub->media;
 				/* mark real state of originators media (no flag set - inactive, real_sendonly - sendonly) */
 				if (MEDIA_ISSET(sub_m, RECV))
@@ -2111,8 +2116,7 @@ static void __media_player_cache_entry_free(struct media_player_cache_entry *e) 
 	mutex_destroy(&e->lock);
 	g_free(e->info_str);
 	if (t_hash_table_is_set(e->wait_queue)) {
-		media_player_ht_iter iter;
-		t_hash_table_iter_init(&iter, e->wait_queue);
+		__auto_type iter = t_hash_table_iter(e->wait_queue);
 		struct media_player *mp;
 		while (t_hash_table_iter_next(&iter, &mp, NULL))
 			obj_put(&mp->tt_obj);
@@ -2743,9 +2747,8 @@ charp_q media_player_list_player_cache(void) {
 #ifdef WITH_TRANSCODING
 	if (!t_hash_table_is_set(media_player_cache))
 		return ret;
-	media_player_cache_ht_iter iter;
 	LOCK(&media_player_cache_lock);
-	t_hash_table_iter_init(&iter, media_player_cache);
+	__auto_type iter = t_hash_table_iter(media_player_cache);
 	struct media_player_cache_entry *entry;
 	while (t_hash_table_iter_next(&iter, NULL, &entry))
 		t_queue_push_tail(&ret, g_strdup_printf("%s for PT " STR_FORMAT, entry->info_str,
@@ -2772,10 +2775,9 @@ unsigned int media_player_evict_player_caches(void) {
 
 	// grab references from hash table
 	media_player_cache_entry_q q = TYPED_GQUEUE_INIT;
-	media_player_cache_ht_iter iter;
 	{
 		LOCK(&media_player_cache_lock);
-		t_hash_table_iter_init(&iter, media_player_cache);
+		__auto_type iter = t_hash_table_iter(media_player_cache);
 		struct media_player_cache_entry *entry;
 		while (t_hash_table_iter_next(&iter, NULL, &entry))
 			t_queue_push_tail(&q, obj_get(entry));

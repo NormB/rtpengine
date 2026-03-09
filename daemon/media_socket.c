@@ -1534,8 +1534,7 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(kernelize_state, kernelize_state_clear)
 
 __attribute__((nonnull(1, 2)))
 static void fill_bundle_pt_stats(kernelize_state *s, struct call_media *bundle, unsigned int component) {
-	pt_media_ht_iter iter;
-	t_hash_table_iter_init(&iter, bundle->pt_media);
+	__auto_type iter = t_hash_table_iter(bundle->pt_media);
 	void *pt;
 	struct call_media *pt_media;
 	while (t_hash_table_iter_next(&iter, &pt, &pt_media)) {
@@ -1556,8 +1555,7 @@ static void fill_pt_stats(kernelize_state *s, struct packet_stream *stream, unsi
 		return;
 	}
 
-	rtp_stats_ht_iter iter;
-	t_hash_table_iter_init(&iter, stream->rtp_stats);
+	__auto_type iter = t_hash_table_iter(stream->rtp_stats);
 	struct rtp_stats *rs;
 	while (t_hash_table_iter_next(&iter, NULL, &rs) && s->num_payload_types < RTPE_NUM_PAYLOAD_TYPES) {
 		s->pts[s->num_payload_types].stream = stream;
@@ -3128,7 +3126,7 @@ static bool media_packet_address_check(struct packet_handler_ctx *phc)
 	// confirmation purposes when needed. This is regardless of whether rtcp-mux
 	// is enabled or not.
 	if (!phc->mp.sfd->confirmed && PS_ISSET(phc->mp.stream, RTP)) {
-		if (rtcp_demux_is_rtcp(&phc->s)) {
+		if (rtcp_demux_is_rtcp(&phc->s) && rtcp_pt(&phc->s) != RTCP_PT_APP) {
 			ilog(LOG_DEBUG | LOG_FLAG_LIMIT, "Ignoring stray RTCP packet from %s%s%s for "
 					"peer address confirmation purposes",
 					FMT_M(endpoint_print_buf(&phc->mp.fsin)));
@@ -3743,24 +3741,11 @@ out:
 		unconfirm_sinks(&phc->mp.stream->rtcp_sinks, "peer address unconfirmed");
 	}
 	if (phc->unkernelize_subscriptions) {
-		g_auto(GQueue) mls = G_QUEUE_INIT; /* to avoid duplications */
-		for (__auto_type sub = phc->mp.media->media_subscriptions.head; sub; sub = sub->next)
-		{
-			struct media_subscription * ms = sub->data;
-
-			if (!g_queue_find(&mls, ms->monologue)) {
-				for (unsigned int k = 0; k < ms->monologue->medias->len; k++)
-				{
-					struct call_media *sub_media = ms->monologue->medias->pdata[k];
-					if (!sub_media)
-						continue;
-
-					for (__auto_type m = sub_media->streams.head; m; m = m->next) {
-						struct packet_stream *sub_ps = m->data;
-						__unkernelize(sub_ps, "subscriptions modified");
-					}
-				}
-				g_queue_push_tail(&mls, ms->monologue);
+		IQUEUE_FOREACH(&phc->mp.media->media_subscriptions, ms) {
+			__auto_type sub_media = ms->media;
+			for (__auto_type m = sub_media->streams.head; m; m = m->next) {
+				struct packet_stream *sub_ps = m->data;
+				__unkernelize(sub_ps, "subscriptions modified");
 			}
 		}
 	}
@@ -4049,20 +4034,17 @@ void interfaces_free(void) {
 	while ((ifc = t_queue_pop_head(&all_local_interfaces))) {
 		free(ifc->ice_foundation.s);
 		bufferpool_unref(ifc->stats);
-		g_free(ifc);
 	}
 
 	t_hash_table_destroy(__logical_intf_name_family_hash);
 
-	local_intf_ht_iter l_iter;
-	t_hash_table_iter_init(&l_iter, __local_intf_addr_type_hash);
+	__auto_type l_iter = t_hash_table_iter(__local_intf_addr_type_hash);
 	local_intf_list *lifl;
 	while (t_hash_table_iter_next(&l_iter, NULL, &lifl))
 		t_list_free(lifl);
 	t_hash_table_destroy(__local_intf_addr_type_hash);
 
-	intf_spec_ht_iter s_iter;
-	t_hash_table_iter_init(&s_iter, __intf_spec_addr_type_hash);
+	__auto_type s_iter = t_hash_table_iter(__intf_spec_addr_type_hash);
 	intf_spec_q *spec_q;
 	while (t_hash_table_iter_next(&s_iter, NULL, &spec_q)) {
 		while (spec_q->length) {
@@ -4078,8 +4060,7 @@ void interfaces_free(void) {
 	}
 	t_hash_table_destroy(__intf_spec_addr_type_hash);
 
-	intf_rr_lookup_iter r_iter;
-	t_hash_table_iter_init(&r_iter, __logical_intf_name_family_rr_hash);
+	__auto_type r_iter = t_hash_table_iter(__logical_intf_name_family_rr_hash);
 	struct intf_rr *rr;
 	while (t_hash_table_iter_next(&r_iter, NULL, &rr)) {
 		t_queue_clear(&rr->logical_intfs);

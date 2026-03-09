@@ -332,10 +332,9 @@ struct media_subscription;
 TYPED_GHASHTABLE(codecs_ht, void, rtp_payload_type, g_direct_hash, g_direct_equal, NULL, NULL)
 TYPED_GHASHTABLE(codec_names_ht, str, GQueue, str_case_hash, str_case_equal, str_free, g_queue_free)
 TYPED_GHASHTABLE_LOOKUP_INSERT(codec_names_ht, str_free, g_queue_new)
-TYPED_GQUEUE(subscription, struct media_subscription)
 TYPED_DIRECT_FUNCS(media_direct_hash, media_direct_eq, struct call_media)
-TYPED_GHASHTABLE(subscription_ht, struct call_media, subscription_list, media_direct_hash, media_direct_eq,
-		NULL, NULL)
+TYPED_GHASHTABLE(subscription_ht, struct call_media, struct media_subscription,
+		media_direct_hash, media_direct_eq, NULL, NULL)
 TYPED_GHASHTABLE(media_id_ht, str, struct call_media, str_hash, str_equal, NULL, NULL)
 TYPED_GHASHTABLE(pt_media_ht, void, struct call_media, g_direct_hash, g_direct_equal, NULL, NULL)
 
@@ -480,6 +479,19 @@ struct extmap_ops {
 extern const struct extmap_ops extmap_ops_long;
 
 
+
+struct media_subscription {
+	IQUEUE_LINK		link;
+	struct call_media	*media;		/* media itself */
+	struct call_monologue	*monologue;	/* whom media belongs to */
+	struct sink_attrs	attrs;		/* attributes to passed to a sink */
+	struct media_subscription *reverse;	// opposite (subscription -> subscriber / vice versa)
+};
+
+typedef IQUEUE_TYPE(struct media_subscription, link) subscription_q;
+
+
+
 /**
  * Protected by call->master_lock, except the RO elements.
  * 
@@ -492,6 +504,7 @@ struct call_media {
 
 	unsigned int		index;				/* RO */
 	unsigned int		unique_id;			/* RO */
+	struct stream_params	sp;
 	str			type;
 	enum media_type		type_id;
 	str			protocol_str;
@@ -579,13 +592,6 @@ TYPED_GQUEUE(medias, struct call_media)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(medias_q, medias_q_clear)
 
 
-struct media_subscription {
-	struct call_media	* media;	/* media itself */
-	struct call_monologue	* monologue;	/* whom media belongs to */
-	struct sink_attrs	attrs;		/* attributes to passed to a sink */
-	subscription_list	* link;		/* TODO: is this still really needed? */
-};
-
 /**
  * Half a dialogue.
  * Protected by call->master_lock, except the RO elements.
@@ -619,7 +625,6 @@ struct call_monologue {
 	struct media_player	*player;
 	struct media_player	*rec_player;
 	struct session_bandwidth sdp_session_bandwidth;
-	sdp_streams_q		last_in_sdp_streams;	/* last parsed `stream_params` */
 	GString			*last_out_sdp;
 
 	sdp_origin * session_sdp_orig;	/* actual origin belonging to this monologue */
@@ -665,11 +670,13 @@ struct call_monologue {
 
 TYPED_GQUEUE(monologues, struct call_monologue)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(monologues_q, monologues_q_clear)
-TYPED_GHASHTABLE(tags_ht, str, struct call_monologue, str_hash, str_equal, NULL, NULL)
+TYPED_GHASHTABLE(str_ml_ht, str, struct call_monologue, str_hash, str_equal, NULL, NULL)
 
 struct sdp_fragment;
 TYPED_GQUEUE(fragment, struct sdp_fragment)
 TYPED_GHASHTABLE(fragments_ht, str, fragment_q, str_hash, str_equal, NULL, NULL)
+
+TYPED_GHASHTABLE(endpoint_ml_ht, endpoint_t, struct call_monologue, endpoint_hash, endpoint_eq, NULL, NULL)
 
 
 struct call_iterator_list {
@@ -721,8 +728,6 @@ struct call_iterator_entry {
 	} while (0)
 
 
-TYPED_GHASHTABLE(labels_ht, str, struct call_monologue, str_hash, str_equal, NULL, NULL)
-
 /**
  * call_t is the main parent structure of all call-related objects.
  * 
@@ -773,9 +778,11 @@ struct call {
 	/* everything below is protected by the master_lock */
 	monologues_q		monologues;	/* call_monologue */
 	medias_q		medias;		/* call_media */
-	tags_ht			tags;
-	tags_ht			viabranches;
-	labels_ht		labels;
+	str_ml_ht		tags;
+	str_ml_ht		viabranches;
+	str_ml_ht		labels;
+	str_ml_ht		sdps;
+	endpoint_ml_ht		endpoints;
 	fragments_ht		sdp_fragments;
 	packet_stream_q		streams;
 	stream_fd_q		stream_fds;	/* stream_fd */
@@ -866,7 +873,7 @@ int call_get_mono_dialogue(struct call_monologue *monologues[2], call_t *call,
 		const str *fromtag,
 		const str *totag,
 		const str *viabranch,
-		sdp_ng_flags *);
+		sdp_ng_flags *, const endpoint_t *);
 struct call_monologue *call_get_monologue(call_t *call, const str *fromtag);
 struct call_monologue *call_get_or_create_monologue(call_t *call, const str *fromtag);
 __attribute__((nonnull(1, 2, 4, 5, 6)))
@@ -924,7 +931,6 @@ const rtp_payload_type *__rtp_stats_codec(struct call_media *m);
 
 #define call_malloc memory_arena_alloc
 #define call_dup memory_arena_dup
-#define call_ref memory_arena_ref
 
 #define call_strdup memory_arena_strdup
 #define call_strdup_str memory_arena_strdup_str

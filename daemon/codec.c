@@ -55,7 +55,7 @@ static struct timerthread codec_timers_thread;
 
 static void rtp_payload_type_copy(rtp_payload_type *dst, const rtp_payload_type *src);
 static void codec_store_add_raw_order(struct codec_store *cs, rtp_payload_type *pt);
-static rtp_payload_type *codec_store_find_compatible(struct codec_store *cs,
+static rtp_payload_type *codec_store_find_compatible(const struct codec_store *cs,
 		const rtp_payload_type *pt);
 static void __rtp_payload_type_add_name(codec_names_ht, rtp_payload_type *pt);
 static void codec_calc_lost(struct ssrc_entry_call *ssrc, uint16_t seq);
@@ -1441,7 +1441,7 @@ void __codec_handlers_update(struct call_media *receiver, struct call_media *sin
 		return;
 
 	/* required for updating the transcoding attrs of subscriber */
-	struct media_subscription * ms = call_get_media_subscription(receiver->media_subscribers_ht, sink);
+	struct media_subscription *ms = call_get_media_subscription(receiver->media_subscribers_ht, sink);
 
 	ilogs(codec, LOG_DEBUG, "Setting up codec handlers for " STR_FORMAT_M " #%u -> " STR_FORMAT_M " #%u",
 			STR_FMT_M(&monologue->tag), receiver->index,
@@ -4928,10 +4928,8 @@ void codec_update_all_handlers(struct call_monologue *ml) {
 		if (!source_media)
 			continue;
 
-		for (__auto_type sub = source_media->media_subscribers.head; sub; sub = sub->next)
-		{
-			struct media_subscription * ms = sub->data;
-			struct call_media * sink_media = ms->media;
+		IQUEUE_FOREACH(&source_media->media_subscribers, ms) {
+			struct call_media *sink_media = ms->media;
 
 			if (!sink_media)
 				continue;
@@ -4950,10 +4948,8 @@ void codec_update_all_source_handlers(struct call_monologue *ml, const sdp_ng_fl
 		if (!sink_media)
 			continue;
 
-		for (__auto_type sub = sink_media->media_subscriptions.head; sub; sub = sub->next)
-		{
-			struct media_subscription * ms = sub->data;
-			struct call_media * source_media = ms->media;
+		IQUEUE_FOREACH(&sink_media->media_subscriptions, ms) {
+			struct call_media *source_media = ms->media;
 
 			if (!source_media)
 				continue;
@@ -5616,7 +5612,7 @@ static void codec_store_add_end(struct codec_store *cs, rtp_payload_type *pt) {
 	codec_store_add_link(cs, pt, NULL);
 }
 
-static rtp_payload_type *codec_store_find_compatible_q(struct codec_store *cs, GQueue *q,
+static rtp_payload_type *codec_store_find_compatible_q(const struct codec_store *cs, GQueue *q,
 		const rtp_payload_type *pt)
 {
 	if (!q)
@@ -5628,7 +5624,7 @@ static rtp_payload_type *codec_store_find_compatible_q(struct codec_store *cs, G
 	}
 	return NULL;
 }
-static rtp_payload_type *codec_store_find_compatible(struct codec_store *cs,
+static rtp_payload_type *codec_store_find_compatible(const struct codec_store *cs,
 		const rtp_payload_type *pt)
 {
 	rtp_payload_type *ret;
@@ -5678,7 +5674,7 @@ void __codec_store_populate_reuse(struct codec_store *dst, struct codec_store *s
 			codec_store_add_raw_link(dst, dup, pos);
 		}
 		else {
-			if (!a.answer_only) {
+			if (!a.answer_cs) {
 				ilogs(codec, LOG_DEBUG, "Adding codec " STR_FORMAT "/" STR_FORMAT
 					" (%i) to end of list",
 						STR_FMT(&pt->encoding_with_params),
@@ -5758,8 +5754,11 @@ void __codec_store_populate(struct codec_store *dst, struct codec_store *src, st
 				GINT_TO_POINTER(pt->payload_type));
 		if (orig_pt && !rtp_payload_type_eq_compat(orig_pt, pt))
 			orig_pt = NULL;
-		if (a.answer_only && !orig_pt) {
-			if (a.allow_asymmetric)
+		if (a.answer_cs && !orig_pt) {
+			orig_pt = t_hash_table_lookup(a.answer_cs->codecs, GINT_TO_POINTER(pt->payload_type));
+			if (orig_pt && !rtp_payload_type_eq_compat(orig_pt, pt))
+				orig_pt = NULL;
+			if (a.allow_asymmetric && !orig_pt)
 				orig_pt = codec_store_find_compatible(&orig_dst, pt);
 			if (!orig_pt) {
 				ilogs(codec, LOG_DEBUG, "Not adding stray answer codec "

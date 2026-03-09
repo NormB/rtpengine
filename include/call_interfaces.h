@@ -142,6 +142,11 @@ struct sdp_ng_flags {
 		AP_TRANSCODING,
 		AP_FORCE,
 	} audio_player:2;
+	enum {
+		AK_NONE = 0,
+		AK_SDP,
+		AK_ADDRESS,
+	} alias_key:2;
 	enum endpoint_learning el_option;
 	enum block_dtmf_mode block_dtmf_mode;
 	int delay_buffer;
@@ -191,6 +196,7 @@ RTPE_NG_FLAGS_STR_CASE_HT_PARAMS
 #undef X
 
 	bool         asymmetric:1,
+		     rtpp_flags:1,
 	             protocol_accept:1,
 	             no_redis_update:1,
 	             unidirectional:1,
@@ -218,6 +224,7 @@ RTPE_NG_FLAGS_STR_CASE_HT_PARAMS
 		     rtcp_mirror:1,
 		     trickle_ice:1,
 	             no_rtcp_attr:1,
+	             no_tls_id:1,
 	             full_rtcp_attr:1,
 	             generate_rtcp:1,
 	             generate_rtcp_off:1,
@@ -350,7 +357,6 @@ const char *call_transform_ng(ng_command_ctx_t *);
 
 void add_media_to_sub_list(subscription_q *q, struct call_media *media, struct call_monologue *ml);
 
-void save_last_sdp(struct call_monologue *ml, str *sdp, sdp_sessions_q *parsed, sdp_streams_q *streams);
 void call_ng_flags_init(sdp_ng_flags *out, enum ng_opmode opmode);
 void call_ng_free_flags(sdp_ng_flags *flags);
 void call_unlock_release(call_t *c);

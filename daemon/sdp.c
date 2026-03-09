@@ -1788,14 +1788,25 @@ static void __sdp_t38(struct stream_params *sp, struct sdp_media *media) {
 }
 
 
-static void sp_free(struct stream_params *s) {
+void sdp_sp_clear(struct stream_params *s) {
 	codec_store_cleanup(&s->codecs);
 	ice_candidates_free(&s->ice_candidates);
 	crypto_params_sdes_queue_clear(&s->sdes_params);
 	t_queue_clear_full(&s->generic_attributes, sdp_attr_free);
 	t_queue_clear_full(&s->all_attributes, sdp_attr_free);
 	t_queue_clear_full(&s->extmap, rtp_extension_free);
+}
+
+static void sp_free(struct stream_params *s) {
+	sdp_sp_clear(s);
 	g_free(s);
+}
+
+void sdp_sp_move(struct stream_params *dst, struct stream_params *src) {
+	sdp_sp_clear(dst);
+	*dst = *src;
+	*src = (struct stream_params) {};
+	src->media_id = dst->media_id; // used by the `tracker` hash table in call_get_media()
 }
 
 
@@ -2594,7 +2605,7 @@ static void insert_dtls(GString *s, struct call_media *media, struct dtls_connec
 
 	insert_fingerprint(s, media, flags, hf, fp);
 
-	if (dtls)
+	if (dtls && !flags->no_tls_id)
 		insert_tls_id(s, media, flags, dtls);
 }
 
@@ -3117,8 +3128,7 @@ static void append_bundle_groups(GString *out, struct call_monologue *ml, sdp_ng
 		}
 	}
 
-	bundle_ht_iter iter;
-	t_hash_table_iter_init(&iter, ht);
+	__auto_type iter = t_hash_table_iter(ht);
 
 	GString *bundle_str;
 	while (t_hash_table_iter_next(&iter, NULL, &bundle_str)) {

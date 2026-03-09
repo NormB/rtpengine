@@ -154,9 +154,9 @@ static void cli_incoming_media_evict_players(str *instr, struct cli_writer *cw, 
 HANDLER_START(cli_set_handlers)
 	HANDLER_CMD("maxopenfiles",		cli_incoming_set_maxopenfiles,		"<uint>",				"set the max number of allowed open files")
 	HANDLER_CMD("maxsessions",		cli_incoming_set_maxsessions,		"<int>",				"set the max number of allowed sessions")
-	HANDLER_CMD("maxcpu",			cli_incoming_set_maxcpu,		"<float>",				"set maxmimum CPU usage allowed")
-	HANDLER_CMD("maxload",			cli_incoming_set_maxload,		"<float>",				"set maxmimum load average allowed")
-	HANDLER_CMD("maxbw",			cli_incoming_set_maxbw,			"<uint>",				"set maxmimum bandwidth usage average allowed")
+	HANDLER_CMD("maxcpu",			cli_incoming_set_maxcpu,		"<float>",				"set maximum CPU usage allowed")
+	HANDLER_CMD("maxload",			cli_incoming_set_maxload,		"<float>",				"set maximum load average allowed")
+	HANDLER_CMD("maxbw",			cli_incoming_set_maxbw,			"<uint>",				"set maximum bandwidth usage average allowed")
 	HANDLER_CMD("timeout",			cli_incoming_set_timeout,		"<uint>",				"set the --timeout parameter")
 	HANDLER_CMD("silenttimeout",		cli_incoming_set_silenttimeout,		"<uint>",				"set the --silent-timeout parameter")
 	HANDLER_CMD("offertimeout",		cli_incoming_set_offertimeout,		"<uint>",				"set the --offer-timeout parameter")
@@ -178,9 +178,9 @@ HANDLER_START(cli_list_handlers)
 	HANDLER_CMD("counters",			cli_incoming_list_counters,		NULL,					"print per-second counters")
 	HANDLER_CMD("maxopenfiles",		cli_incoming_list_maxopenfiles,		NULL,					"print the number of allowed open files")
 	HANDLER_CMD("maxsessions",		cli_incoming_list_maxsessions,		NULL,					"print the number of allowed sessions")
-	HANDLER_CMD("maxcpu",			cli_incoming_list_maxcpu,		NULL,					"print maxmimum CPU usage allowed")
-	HANDLER_CMD("maxload",			cli_incoming_list_maxload,		NULL,					"print maxmimum load average allowed")
-	HANDLER_CMD("maxbw",			cli_incoming_list_maxbw	,		NULL,					"print maxmimum bandwidth usage average allowed")
+	HANDLER_CMD("maxcpu",			cli_incoming_list_maxcpu,		NULL,					"print maximum CPU usage allowed")
+	HANDLER_CMD("maxload",			cli_incoming_list_maxload,		NULL,					"print maximum load average allowed")
+	HANDLER_CMD("maxbw",			cli_incoming_list_maxbw	,		NULL,					"print maximum bandwidth usage average allowed")
 	HANDLER_CMD("timeout",			cli_incoming_list_timeout,		NULL,					"print timeout parameter")
 	HANDLER_CMD("silenttimeout",		cli_incoming_list_silenttimeout,	NULL,					"print silent-timeout parameter")
 	HANDLER_CMD("offertimeout",		cli_incoming_list_offertimeout,		NULL,					"print offer-timeout parameter")
@@ -753,10 +753,8 @@ static void cli_list_tag_info(struct cli_writer *cw, struct call_monologue *ml) 
 		if (!media)
 			continue;
 
-		for (__auto_type sub = media->media_subscriptions.head; sub; sub = sub->next)
-		{
-			struct media_subscription * ms = sub->data;
-			struct call_media * sub_media = ms->media;
+		IQUEUE_FOREACH(&media->media_subscriptions, ms) {
+			struct call_media *sub_media = ms->media;
 			if (!sub_media)
 				continue;
 
@@ -764,10 +762,8 @@ static void cli_list_tag_info(struct cli_writer *cw, struct call_monologue *ml) 
 					STR_FMT_M(&ms->monologue->tag), sub_media->index);
 		}
 
-		for (__auto_type sub = media->media_subscribers.head; sub; sub = sub->next)
-		{
-			struct media_subscription * ms = sub->data;
-			struct call_media * sub_media = ms->media;
+		IQUEUE_FOREACH(&media->media_subscribers, ms) {
+			struct call_media *sub_media = ms->media;
 			if (!sub_media)
 				continue;
 
@@ -1831,8 +1827,7 @@ static void cli_incoming_list_transcoders(str *instr, struct cli_writer *cw, con
 		int last_tv_sec = rtpe_now / 1000000L - 1;
 		unsigned int idx = last_tv_sec & 1;
 
-		codec_stats_ht_iter iter;
-		t_hash_table_iter_init(&iter, rtpe_codec_stats);
+		__auto_type iter = t_hash_table_iter(rtpe_codec_stats);
 		char *chain;
 		struct codec_stats *stats_entry;
 		while (t_hash_table_iter_next(&iter, &chain, &stats_entry)) {

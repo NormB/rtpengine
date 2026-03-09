@@ -192,7 +192,7 @@ static str call_update_lookup_udp(char **out, enum ng_opmode opmode, const char*
 
 	updated_created_from(c, addr);
 
-	if (call_get_mono_dialogue(monologues, c, &fromtag, &totag, NULL, NULL))
+	if (call_get_mono_dialogue(monologues, c, &fromtag, &totag, NULL, NULL, NULL))
 		goto ml_fail;
 
 	struct call_monologue *from_ml = monologues[0];
@@ -355,7 +355,7 @@ static str call_request_lookup_tcp(char **out, enum ng_opmode opmode) {
 		str_swap(&fromtag, &totag);
 	}
 
-	if (call_get_mono_dialogue(monologues, c, &fromtag, &totag, NULL, NULL)) {
+	if (call_get_mono_dialogue(monologues, c, &fromtag, &totag, NULL, NULL, NULL)) {
 		ilog(LOG_WARNING, "Invalid dialogue association");
 		goto out2;
 	}
@@ -1255,6 +1255,10 @@ void call_ng_flags_flags(str *s, unsigned int idx, helper_arg arg) {
 		case CSH_LOOKUP("no RTCP attribute"):
 			out->no_rtcp_attr = true;
 			break;
+		case CSH_LOOKUP("no-tls-id"):
+		case CSH_LOOKUP("no tls id"):
+			out->no_tls_id = true;
+			break;
 		case CSH_LOOKUP("no-jitter-buffer"):
 		case CSH_LOOKUP("no jitter buffer"):
 			out->disable_jb = true;
@@ -1795,6 +1799,26 @@ void call_ng_main_flags(const ng_parser_t *parser, str *key, parser_arg value, h
 							STR_FMT(&s));
 			}
 			break;
+		case CSH_LOOKUP("alias-key"):
+			switch (__csh_lookup_n(1, &s)) {
+				case CSH_LOOKUP_N(1, "none"):
+				case CSH_LOOKUP_N(1, "off"):
+				case CSH_LOOKUP_N(1, "no"):
+					out->alias_key = AK_NONE;
+					break;
+				case CSH_LOOKUP_N(1, "sdp"):
+				case CSH_LOOKUP_N(1, "SDP"):
+					out->alias_key = AK_SDP;
+					break;
+				case CSH_LOOKUP_N(1, "address"):
+				case CSH_LOOKUP_N(1, "endpoint"):
+					out->alias_key = AK_ADDRESS;
+					break;
+				default:
+					ilog(LOG_WARN, "Unknown 'alias-key' flag encountered: '" STR_FORMAT "'",
+							STR_FMT(&s));
+			}
+			break;
 		case CSH_LOOKUP("audio-player"):
 		case CSH_LOOKUP("player"):
 			switch (__csh_lookup_n(1, &s)) {
@@ -2228,6 +2252,7 @@ void call_ng_main_flags(const ng_parser_t *parser, str *key, parser_arg value, h
 		case CSH_LOOKUP("rtpp-flags"):
 		case CSH_LOOKUP("rtpp_flags"):;
 			/* s - list of rtpp flags */
+			out->rtpp_flags = true;
 			parse_rtpp_flags(&s, out);
 			break;
 		case CSH_LOOKUP("SDES"):
@@ -2339,6 +2364,8 @@ void call_ng_main_flags(const ng_parser_t *parser, str *key, parser_arg value, h
 			out->to_call_id = s;
 			break;
 		case CSH_LOOKUP("to-tag"):
+		case CSH_LOOKUP("to_tag"):
+		case CSH_LOOKUP("to tag"):
 			out->to_tag = s;
 			break;
 		case CSH_LOOKUP("TOS"):
@@ -2539,13 +2566,6 @@ static enum load_limit_reasons call_offer_session_limit(void) {
 }
 
 
-void save_last_sdp(struct call_monologue *ml, str *sdp, sdp_sessions_q *parsed, sdp_streams_q *streams) {
-	sdp_streams_clear(&ml->last_in_sdp_streams);
-	ml->last_in_sdp_streams = *streams;
-	t_queue_init(streams);
-}
-
-
 static enum basic_errors call_ng_basic_checks(sdp_ng_flags *flags)
 {
 	if (!flags->sdp.s)
@@ -2588,7 +2608,7 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char* addr)
 	g_auto(sdp_sessions_q) parsed = TYPED_GQUEUE_INIT;
 	g_auto(sdp_streams_q) streams = TYPED_GQUEUE_INIT;
 	g_autoptr(call_t) call = NULL;
-	struct call_monologue * monologues[2];
+	struct call_monologue *monologues[2];
 	int ret;
 	g_auto(sdp_ng_flags) flags;
 	parser_arg output = ctx->resp;
@@ -2659,7 +2679,8 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char* addr)
 
 	errstr = "Invalid dialogue association";
 	if (call_get_mono_dialogue(monologues, call, &flags.from_tag, &flags.to_tag,
-			flags.via_branch.s ? &flags.via_branch : NULL, &flags)) {
+			flags.via_branch.s ? &flags.via_branch : NULL, &flags,
+			streams.length ? &streams.head->data->rtp_endpoint : NULL)) {
 		goto out;
 	}
 
@@ -2680,7 +2701,13 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char* addr)
 	}
 
 	if (flags.block_dtmf)
-		call_set_dtmf_block(call, monologues[0], &flags);
+		call_set_dtmf_block(call, from_ml, &flags);
+
+	if (flags.alias_key == AK_SDP)
+		t_hash_table_insert(call->sdps, call_str_dup(&sdp), from_ml);
+	else if (flags.alias_key == AK_ADDRESS && streams.length && streams.head->data->rtp_endpoint.port)
+		t_hash_table_insert(call->endpoints, memory_arena_objdup(streams.head->data->rtp_endpoint),
+				from_ml);
 
 	struct recording *recording = NULL;
 
@@ -2703,7 +2730,6 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char* addr)
 		/* if all fine, prepare an outer sdp and save it */
 		if (sdp_create(&sdp_out, to_ml, &flags)) {
 			/* TODO: should we save sdp_out? */
-			save_last_sdp(from_ml, &sdp, &parsed, &streams);
 			ret = 0;
 		}
 		else
@@ -2997,11 +3023,7 @@ static void ng_stats_monologue(ng_command_ctx_t *ctx, parser_arg dict, const str
 		if (!media)
 			continue;
 
-		for (__auto_type subscription = media->media_subscriptions.head;
-				subscription;
-				subscription = subscription->next)
-		{
-			struct media_subscription * ms = subscription->data;
+		IQUEUE_FOREACH(&media->media_subscriptions, ms) {
 			if (!g_queue_find(&mls_subscriptions, ms->monologue)) {
 				parser_arg sub1 = parser->list_add_dict(b_subscriptions);
 				parser->dict_add_str(sub1, "tag", &ms->monologue->tag);
@@ -3009,11 +3031,7 @@ static void ng_stats_monologue(ng_command_ctx_t *ctx, parser_arg dict, const str
 				g_queue_push_tail(&mls_subscriptions, ms->monologue);
 			}
 		}
-		for (__auto_type subscriber = media->media_subscribers.head;
-				subscriber;
-				subscriber = subscriber->next)
-		{
-			struct media_subscription * ms = subscriber->data;
+		IQUEUE_FOREACH(&media->media_subscribers, ms) {
 			if (!g_queue_find(&mls_subscribers, ms->monologue)) {
 				parser_arg sub1 = parser->list_add_dict(b_subscribers);
 				parser->dict_add_str(sub1, "tag", &ms->monologue->tag);
@@ -3197,11 +3215,7 @@ stats:
 				if (!media)
 					continue;
 
-				for (__auto_type subscription = media->media_subscriptions.head;
-						subscription;
-						subscription = subscription->next)
-				{
-					struct media_subscription * ms = subscription->data;
+				IQUEUE_FOREACH(&media->media_subscriptions, ms) {
 					if (!g_queue_find(&mls, ms->monologue)) {
 						ng_stats_monologue(ctx, tags, ms->monologue, totals, ssrc);
 						g_queue_push_tail(&mls, ms->monologue);
@@ -3226,12 +3240,11 @@ stats:
 }
 
 static void ng_list_calls(ng_command_ctx_t *ctx, parser_arg output, long long int limit) {
-	rtpe_calls_ht_iter iter;
 	const ng_parser_t *parser = ctx->parser_ctx.parser;
 
 	rwlock_lock_r(&rtpe_callhash_lock);
 
-	t_hash_table_iter_init (&iter, rtpe_callhash);
+	__auto_type iter = t_hash_table_iter(rtpe_callhash);
 	str *key;
 	while (limit-- && t_hash_table_iter_next (&iter, &key, NULL)) {
 		parser->list_add_str_dup(output, key);
@@ -3449,7 +3462,7 @@ void add_media_to_sub_list(subscription_q *q, struct call_media *media, struct c
 	struct media_subscription *ms = g_new0(__typeof(*ms), 1);
 	ms->media = media;
 	ms->monologue = ml;
-	t_queue_push_tail(q, ms);
+	i_queue_push_tail(q, ms);
 }
 static const char *media_block_match_mult(call_t **call, subscription_q *medias,
 		sdp_ng_flags *flags, ng_command_ctx_t *ctx)
@@ -3789,16 +3802,16 @@ static const char *call_block_silence_media(ng_command_ctx_t *ctx, bool on_off, 
 					struct call_media * ml_media = monologue->medias->pdata[j];
 					if (!ml_media)
 						continue;
-					subscription_list * ll = t_hash_table_lookup(ml_media->media_subscriptions_ht, sink_md);
+					__auto_type ll = t_hash_table_lookup(ml_media->media_subscriptions_ht, sink_md);
 					if (ll) {
 						found_subscriptions = true;
-						G_STRUCT_MEMBER(bool, &ll->data->attrs, attr_offset) = on_off;
+						G_STRUCT_MEMBER(bool, &ll->attrs, attr_offset) = on_off;
 						ilog(LOG_INFO, "%s directional media flow: "
 								"monologue tag '" STR_FORMAT_M "' -> '" STR_FORMAT_M "' / "
 								"media index '%d' -> '%d'",
 								ucase_verb,
-								STR_FMT_M(&monologue->tag), STR_FMT_M(&ll->data->monologue->tag),
-								ml_media->index, ll->data->media->index);
+								STR_FMT_M(&monologue->tag), STR_FMT_M(&ll->monologue->tag),
+								ml_media->index, ll->media->index);
 					}
 				}
 				sinks = true;
@@ -3814,10 +3827,8 @@ static const char *call_block_silence_media(ng_command_ctx_t *ctx, bool on_off, 
 				if (!ml_media)
 					continue;
 
-				for (__auto_type sub = ml_media->media_subscribers.head; sub; sub = sub->next)
-				{
-					struct media_subscription * ms = sub->data;
-					struct call_media * sub_md = ms->media;
+				IQUEUE_FOREACH(&ml_media->media_subscribers, ms) {
+					struct call_media *sub_md = ms->media;
 
 					if (!sub_md ||
 						(flags.all == ALL_OFFER_ANSWER && !ms->attrs.offer_answer) ||
@@ -4082,9 +4093,7 @@ found:
 
 			struct call_media * ms_media_sink = NULL;
 
-			for (__auto_type ll = ml_media->media_subscribers.head; ll; ll = ll->next)
-			{
-				struct media_subscription * ms = ll->data;
+			IQUEUE_FOREACH(&ml_media->media_subscribers, ms) {
 				ms_media_sink = ms->media;
 				if (!ms_media_sink || ms_media_sink->type_id != MT_AUDIO)
 					continue;
@@ -4152,7 +4161,6 @@ const char *call_publish_ng(ng_command_ctx_t *ctx, const char *addr) {
 	if (!ok)
 		return "Failed to create SDP";
 
-	save_last_sdp(ml, &sdp_in, &parsed, &streams);
 	ctx->ngbuf->sdp_out = sdp_out.s;
 	parser->dict_add_str(ctx->resp, "sdp", &sdp_out);
 
@@ -4174,7 +4182,7 @@ const char *call_subscribe_request_ng(ng_command_ctx_t *ctx) {
 	g_auto(sdp_ng_flags) flags;
 	char rand_buf[65];
 	g_autoptr(call_t) call = NULL;
-	g_auto(subscription_q) srms = TYPED_GQUEUE_INIT;
+	g_auto(subscription_q) srms = IQUEUE_INIT;
 	g_auto(str) sdp_out = STR_NULL;
 	parser_arg output = ctx->resp;
 	const ng_parser_t *parser = ctx->parser_ctx.parser;
@@ -4198,7 +4206,8 @@ const char *call_subscribe_request_ng(ng_command_ctx_t *ctx) {
 		flags.label = flags.set_label;
 
 	/* get destination monologue */
-	if (!flags.to_tag.len) {
+	// ignore the to-tag if rtpp_flags parsing is active and to-tag wasn't given explicitly
+	if (!flags.to_tag.len || (flags.rtpp_flags && !flags.to_tag_flag)) {
 		/* generate one */
 		flags.to_tag = STR_CONST(rand_buf);
 		rand_hex_str(flags.to_tag.s, flags.to_tag.len / 2);
@@ -4224,7 +4233,7 @@ const char *call_subscribe_request_ng(ng_command_ctx_t *ctx) {
 	 * TODO: deprecate it, since initially added for monologue subscriptions.
 	 */
 	if (srms.length == 1) {
-		struct media_subscription *ms = srms.head->data;
+		struct media_subscription *ms = srms.head;
 		struct call_monologue *source_ml = ms->monologue;
 		parser->dict_add_str_dup(output, "from-tag", &source_ml->tag);
 	}
@@ -4234,8 +4243,7 @@ const char *call_subscribe_request_ng(ng_command_ctx_t *ctx) {
 		media_labels = parser->dict_add_dict(output, "media-labels");
 	}
 	parser_arg from_list = parser->dict_add_list(output, "from-tags");
-	for (__auto_type l = srms.head; l; l = l->next) {
-		struct media_subscription *ms = l->data;
+	IQUEUE_FOREACH(&srms, ms) {
 		struct call_monologue *source_ml = ms->monologue;
 		parser->list_add_str_dup(from_list, &source_ml->tag);
 		if (tag_medias.gen) {
@@ -4502,8 +4510,7 @@ static void parse_templates(charp_ht templates) {
 	if (!t_hash_table_is_set(templates))
 		return;
 
-	charp_ht_iter iter;
-	t_hash_table_iter_init(&iter, templates);
+	__auto_type iter = t_hash_table_iter(templates);
 	char *keyp, *valuep;
 	while (t_hash_table_iter_next(&iter, &keyp, &valuep)) {
 		char *key = keyp;

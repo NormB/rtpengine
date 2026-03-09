@@ -1,5 +1,5 @@
 Name:		ngcp-rtpengine
-Version:	14.1.0.0+0~mr14.1.0.0
+Version:	14.2.0.0+0~mr14.2.0.0
 Release:	1%{?dist}
 Summary:	The Sipwise NGCP rtpengine daemon
 Group:		System Environment/Daemons
@@ -258,6 +258,19 @@ fi
   dkms build -m %{name} -v %{version}-%{release} --rpm_safe_upgrade &&
   dkms install -m %{name} -v %{version}-%{release} --rpm_safe_upgrade --force
 %endif
+
+if ! [ -f /etc/modprobe.d/rtpengine.conf ] || grep -q RPM-GENERATED /etc/modprobe.d/rtpengine.conf; then
+        OPTIONS="options nft_rtpengine proc_mask=0x7"
+
+        PUID=$(id -u %{name} 2> /dev/null)
+        test -z "$PUID" || OPTIONS="$OPTIONS proc_uid=$PUID"
+        PGID=$(id -g %{name} 2> /dev/null)
+        test -z "$PGID" || OPTIONS="$OPTIONS proc_gid=$PGID"
+
+        ( echo "# RPM-GENERATED FILE";
+          echo "$OPTIONS" ) > /etc/modprobe.d/rtpengine.conf
+fi
+
 true
 
 
