@@ -4243,36 +4243,47 @@ const char *call_subscribe_request_ng(ng_command_ctx_t *ctx) {
 		media_labels = parser->dict_add_dict(output, "media-labels");
 	}
 	parser_arg from_list = parser->dict_add_list(output, "from-tags");
-	IQUEUE_FOREACH(&srms, ms) {
-		struct call_monologue *source_ml = ms->monologue;
+
+	for (unsigned int i = 0; i < dest_ml->medias->len; i++) {
+		struct call_media *dest_media = dest_ml->medias->pdata[i];
+		if (!dest_media)
+			continue;
+
+		// each media should be subscribed to just one other media
+		if (!dest_media->media_subscriptions.length)
+			continue;
+
+		struct call_media *source_media = dest_media->media_subscriptions.head->media;
+		struct call_monologue *source_ml = source_media->monologue;
+
 		parser->list_add_str_dup(from_list, &source_ml->tag);
+
+		if (media_labels.gen && dest_media->label.len) {
+			parser_arg label =
+				parser->dict_add_dict(media_labels, dest_media->label.s);
+			parser->dict_add_str(label, "tag", &source_ml->tag);
+			parser->dict_add_int(label, "index", source_media->index);
+			parser->dict_add_str(label, "type", &dest_media->type);
+			if (source_ml->label.len)
+				parser->dict_add_str(label, "label", &source_ml->label);
+			parser->dict_add_string(label, "mode", sdp_get_sendrecv(source_media));
+		}
+
 		if (tag_medias.gen) {
 			parser_arg tag_label = parser->list_add_dict(tag_medias);
 			parser->dict_add_str(tag_label, "tag", &source_ml->tag);
 			if (source_ml->label.len)
 				parser->dict_add_str(tag_label, "label", &source_ml->label);
-			parser_arg medias = parser->dict_add_list(tag_label, "medias");
-			for (unsigned int i = 0; i < source_ml->medias->len; i++) {
-				struct call_media *media = source_ml->medias->pdata[i];
-				if (!media)
-					continue;
-				parser_arg med_ent = parser->list_add_dict(medias);
-				parser->dict_add_int(med_ent, "index", media->index);
-				parser->dict_add_str(med_ent, "type", &media->type);
-				parser->dict_add_str(med_ent, "label", &media->label);
-				parser->dict_add_string(med_ent, "mode", sdp_get_sendrecv(media));
 
-				if (media_labels.gen) {
-					parser_arg label =
-						parser->dict_add_dict(media_labels, media->label.s);
-					parser->dict_add_str(label, "tag", &source_ml->tag);
-					parser->dict_add_int(label, "index", media->index);
-					parser->dict_add_str(label, "type", &media->type);
-					if (source_ml->label.len)
-						parser->dict_add_str(label, "label", &source_ml->label);
-					parser->dict_add_string(label, "mode", sdp_get_sendrecv(media));
-				}
-			}
+			parser_arg medias = parser->dict_add_list(tag_label, "medias");
+
+			// this is a bit strange because in this mode, each list can only
+			// ever get one entry...
+			parser_arg med_ent = parser->list_add_dict(medias);
+			parser->dict_add_int(med_ent, "index", source_media->index);
+			parser->dict_add_str(med_ent, "type", &dest_media->type);
+			parser->dict_add_str(med_ent, "label", &dest_media->label);
+			parser->dict_add_string(med_ent, "mode", sdp_get_sendrecv(source_media));
 		}
 	}
 
@@ -4356,6 +4367,77 @@ const char *call_unsubscribe_ng(ng_command_ctx_t *ctx) {
 	call_unlock_release_update(&call);
 
 	return NULL;
+}
+
+static const char *call_inject_ng(ng_command_ctx_t *ctx, bool start) {
+	g_auto(sdp_ng_flags) flags;
+	g_autoptr(call_t) call = NULL;
+	g_autoptr(call_t) call2 = NULL;
+	parser_arg input = ctx->req;
+	const ng_parser_t *parser = ctx->parser_ctx.parser;
+
+	call_ng_process_flags(&flags, ctx);
+
+	str source_call_id = STR_NULL;
+	str source_tag = STR_NULL;
+
+	if (!flags.call_id.s)
+		return "No call-id in message";
+	if (!flags.to_tag.s)
+		return "No to-tag in message";
+
+	parser->dict_get_str(input, "source-tag", &source_tag);
+	if (!source_tag.s)
+		return "No source-tag in message";
+
+	if (!parser->dict_get_str(input, "source-call-id", &source_call_id))
+		source_call_id = flags.call_id;
+
+	if (str_cmp_str(&source_call_id, &flags.call_id)) {
+		call_get2_ret_t ret = call_get2(&call, &call2, &flags.call_id, &source_call_id);
+		if (ret == CG2_NF1)
+			return "Unknown call-ID";
+		if (ret == CG2_NF2)
+			return "Unknown source call-ID";
+	}
+	else {
+		call = call_get(&flags.call_id);
+		if (!call)
+			return "Unknown call-ID";
+	}
+
+	struct call_monologue *dst_ml = call_get_monologue(call, &flags.to_tag);
+	if (!dst_ml)
+		return "To-tag not found";
+
+	struct call_monologue *src_ml = call_get_monologue(call2 ?: call, &source_tag);
+	if (!src_ml)
+		return "Source-tag not found";
+
+	if (src_ml == dst_ml)
+		return "Trying to inject to self";
+
+	if (call2) {
+		if (!call_merge(call, &call2))
+			return "Failed to merge two calls into one";
+	}
+
+	int ret = start
+		? monologue_inject_start(src_ml, dst_ml, &flags)
+		: monologue_inject_stop(src_ml, dst_ml, &flags);
+	if (ret)
+		return start ? "Failed to start inject" : "Failed to stop inject";
+
+	call_unlock_release_update(&call);
+	return NULL;
+}
+
+const char *call_inject_start_ng(ng_command_ctx_t *ctx) {
+	return call_inject_ng(ctx, true);
+}
+
+const char *call_inject_stop_ng(ng_command_ctx_t *ctx) {
+	return call_inject_ng(ctx, false);
 }
 
 

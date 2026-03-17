@@ -1583,41 +1583,33 @@ static int redis_tags(call_t *c, struct redis_list *tags, parser_arg arg) {
 			ml->sdp_session_timing = call_str_cpy(&s);
 		/* o= */
 		if (!redis_hash_get_str(&s, rh, "sdp_orig_parsed")) {
-			sdp_orig_free(ml->session_sdp_orig);
-			ml->session_sdp_orig = g_new0(__typeof(*ml->session_sdp_orig), 1);
-			ml->session_sdp_orig->parsed = 1;
-			redis_hash_get_llu(&ml->session_sdp_orig->version_num, rh, "sdp_orig_version_num");
+			ml->sdp_orig_in.parsed = 1;
+			redis_hash_get_llu(&ml->sdp_orig_in.version_num, rh, "sdp_orig_version_num");
 			if (!redis_hash_get_str(&s, rh, "sdp_orig_username"))
-				ml->session_sdp_orig->username = call_str_cpy(&s);
+				ml->sdp_orig_in.username = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "sdp_orig_session_id"))
-				ml->session_sdp_orig->session_id = call_str_cpy(&s);
-			if (!redis_hash_get_str(&s, rh, "sdp_orig_version_str"))
-				ml->session_sdp_orig->version_str = call_str_cpy(&s);
+				ml->sdp_orig_in.session_id = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "sdp_orig_address_network_type"))
-				ml->session_sdp_orig->address.network_type = call_str_cpy(&s);
+				ml->sdp_orig_in.address.network_type = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "sdp_orig_address_address_type"))
-				ml->session_sdp_orig->address.address_type = call_str_cpy(&s);
+				ml->sdp_orig_in.address.address_type = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "sdp_orig_address_address"))
-				ml->session_sdp_orig->address.address = call_str_cpy(&s);
+				ml->sdp_orig_in.address.address = call_str_cpy(&s);
 		}
 		/* o= last used of the other side*/
 		if (!redis_hash_get_str(&s, rh, "last_sdp_orig_parsed")) {
-			sdp_orig_free(ml->session_last_sdp_orig);
-			ml->session_last_sdp_orig = g_new0(__typeof(*ml->session_last_sdp_orig), 1);
-			ml->session_last_sdp_orig->parsed = 1;
-			redis_hash_get_llu(&ml->session_last_sdp_orig->version_num, rh, "last_sdp_orig_version_num");
+			ml->sdp_orig_out.parsed = 1;
+			redis_hash_get_llu(&ml->sdp_orig_out.version_num, rh, "last_sdp_orig_version_num");
 			if (!redis_hash_get_str(&s, rh, "last_sdp_orig_username"))
-				ml->session_last_sdp_orig->username = call_str_cpy(&s);
+				ml->sdp_orig_out.username = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "last_sdp_orig_session_id"))
-				ml->session_last_sdp_orig->session_id = call_str_cpy(&s);
-			if (!redis_hash_get_str(&s, rh, "last_sdp_orig_version_str"))
-				ml->session_last_sdp_orig->version_str = call_str_cpy(&s);
+				ml->sdp_orig_out.session_id = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "last_sdp_orig_address_network_type"))
-				ml->session_last_sdp_orig->address.network_type = call_str_cpy(&s);
+				ml->sdp_orig_out.address.network_type = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "last_sdp_orig_address_address_type"))
-				ml->session_last_sdp_orig->address.address_type = call_str_cpy(&s);
+				ml->sdp_orig_out.address.address_type = call_str_cpy(&s);
 			if (!redis_hash_get_str(&s, rh, "last_sdp_orig_address_address"))
-				ml->session_last_sdp_orig->address.address = call_str_cpy(&s);
+				ml->sdp_orig_out.address.address = call_str_cpy(&s);
 		}
 
 		ml->sdp_session_bandwidth.as = (!redis_hash_get_ld(&il, rh, "sdp_session_as")) ? il : -1;
@@ -1792,7 +1784,7 @@ static int redis_link_sfds(struct redis_list *sfds, struct redis_list *streams) 
 /**
  * Supports only `media-subscriptions-*` structures.
  * Restores media subscriptions based on:
- * `unique_id`, `offer_answer`, `rtcp_only`, `egress`
+ * `unique_id`, `offer_answer`, `rtcp_only`, `egress`, `inject`
  */
 static int rbl_subs_cb(str *s, callback_arg_t dummy, struct redis_list *list, void *ptr) {
 	str token;
@@ -1805,13 +1797,17 @@ static int rbl_subs_cb(str *s, callback_arg_t dummy, struct redis_list *list, vo
 	bool offer_answer = false;
 	bool rtcp_only = false;
 	bool egress = false;
+	bool inject = false;
 
 	if (str_token_sep(&token, s, '/')) {
 		offer_answer = str_to_i(&token, 0) ? true : false;
 		if (str_token_sep(&token, s, '/')) {
 			rtcp_only = str_to_i(&token, 0) ? true : false;
-			if (str_token_sep(&token, s, '/'))
+			if (str_token_sep(&token, s, '/')) {
 				egress = str_to_i(&token, 0) ? true : false;
+				if (str_token_sep(&token, s, '/'))
+					inject = str_to_i(&token, 0) ? true : false;
+			}
 		}
 	}
 
@@ -1825,6 +1821,7 @@ static int rbl_subs_cb(str *s, callback_arg_t dummy, struct redis_list *list, vo
 						.offer_answer = offer_answer,
 						.rtcp_only = rtcp_only,
 						.egress = egress,
+						.inject = inject,
 					});
 
 	codec_handlers_update(other_media, media, .reset_transcoding = true);
@@ -2648,25 +2645,23 @@ static str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free) {
 				JSON_SET_SIMPLE_STR("sdp_session_name", &ml->sdp_session_name);
 				JSON_SET_SIMPLE_STR("sdp_session_timing", &ml->sdp_session_timing);
 
-				if (ml->session_sdp_orig) {
-					JSON_SET_SIMPLE_STR("sdp_orig_username", &ml->session_sdp_orig->username);
-					JSON_SET_SIMPLE_STR("sdp_orig_session_id", &ml->session_sdp_orig->session_id);
-					JSON_SET_SIMPLE_STR("sdp_orig_version_str", &ml->session_sdp_orig->version_str);
-					JSON_SET_SIMPLE("sdp_orig_version_num", "%llu", (long long unsigned) ml->session_sdp_orig->version_num);
-					JSON_SET_SIMPLE("sdp_orig_parsed", "%u", (unsigned int) ml->session_sdp_orig->parsed);
-					JSON_SET_SIMPLE_STR("sdp_orig_address_network_type", &ml->session_sdp_orig->address.network_type);
-					JSON_SET_SIMPLE_STR("sdp_orig_address_address_type", &ml->session_sdp_orig->address.address_type);
-					JSON_SET_SIMPLE_STR("sdp_orig_address_address", &ml->session_sdp_orig->address.address);
+				if (ml->sdp_orig_in.parsed) {
+					JSON_SET_SIMPLE_STR("sdp_orig_username", &ml->sdp_orig_in.username);
+					JSON_SET_SIMPLE_STR("sdp_orig_session_id", &ml->sdp_orig_in.session_id);
+					JSON_SET_SIMPLE("sdp_orig_version_num", "%llu", ml->sdp_orig_in.version_num);
+					JSON_SET_SIMPLE("sdp_orig_parsed", "%u", ml->sdp_orig_in.parsed);
+					JSON_SET_SIMPLE_STR("sdp_orig_address_network_type", &ml->sdp_orig_in.address.network_type);
+					JSON_SET_SIMPLE_STR("sdp_orig_address_address_type", &ml->sdp_orig_in.address.address_type);
+					JSON_SET_SIMPLE_STR("sdp_orig_address_address", &ml->sdp_orig_in.address.address);
 				}
-				if (ml->session_last_sdp_orig) {
-					JSON_SET_SIMPLE_STR("last_sdp_orig_username", &ml->session_last_sdp_orig->username);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_session_id", &ml->session_last_sdp_orig->session_id);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_version_str", &ml->session_last_sdp_orig->version_str);
-					JSON_SET_SIMPLE("last_sdp_orig_version_num", "%llu", (long long unsigned) ml->session_last_sdp_orig->version_num);
-					JSON_SET_SIMPLE("last_sdp_orig_parsed", "%u", (unsigned int) ml->session_last_sdp_orig->parsed);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_address_network_type", &ml->session_last_sdp_orig->address.network_type);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_address_address_type", &ml->session_last_sdp_orig->address.address_type);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_address_address", &ml->session_last_sdp_orig->address.address);
+				if (ml->sdp_orig_out.parsed) {
+					JSON_SET_SIMPLE_STR("last_sdp_orig_username", &ml->sdp_orig_out.username);
+					JSON_SET_SIMPLE_STR("last_sdp_orig_session_id", &ml->sdp_orig_out.session_id);
+					JSON_SET_SIMPLE("last_sdp_orig_version_num", "%llu", ml->sdp_orig_out.version_num);
+					JSON_SET_SIMPLE("last_sdp_orig_parsed", "%u", ml->sdp_orig_out.parsed);
+					JSON_SET_SIMPLE_STR("last_sdp_orig_address_network_type", &ml->sdp_orig_out.address.network_type);
+					JSON_SET_SIMPLE_STR("last_sdp_orig_address_address_type", &ml->sdp_orig_out.address.address_type);
+					JSON_SET_SIMPLE_STR("last_sdp_orig_address_address", &ml->sdp_orig_out.address.address);
 				}
 
 				if (ml->sdp_session_bandwidth.as >= 0)
@@ -2713,11 +2708,12 @@ static str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free) {
 			inner = parser->dict_add_list_dup(root, tmp);
 
 			IQUEUE_FOREACH(&media->media_subscriptions, ms) {
-				JSON_ADD_LIST_STRING("%u/%u/%u/%u",
+				JSON_ADD_LIST_STRING("%u/%u/%u/%u/%u",
 						ms->media->unique_id,
 						ms->attrs.offer_answer,
 						ms->attrs.rtcp_only,
-						ms->attrs.egress);
+						ms->attrs.egress,
+						ms->attrs.inject);
 			}
 
 			snprintf(tmp, sizeof(tmp), "media-%u", media->unique_id);

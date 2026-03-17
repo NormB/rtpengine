@@ -152,7 +152,7 @@ static void call_timer_iterator(call_t *c, struct iterator_helper *hlp) {
 			ml->term_reason = tmp_t_reason;
 		}
 
-		goto delete;
+		goto timeout;
 	}
 
 	// other timeouts not applicable to foreign calls
@@ -297,6 +297,7 @@ no_sfd:
 
 	ilog(LOG_INFO, "Closing call due to timeout");
 
+timeout:
 	hlp->del_timeout = g_slist_prepend(hlp->del_timeout, obj_get(c));
 	goto out;
 
@@ -342,10 +343,12 @@ void xmlrpc_kill_calls(struct xmlrpc_helper *xh) {
 		}
 
 		if (tag)
-			ilog(LOG_INFO, "Initiating XMLRPC for call (ID " STR_FORMAT_M ", tag " STR_FORMAT_M ")",
-					STR_FMT_M(call_id), STR_FMT_M(tag));
+			ilog(LOG_INFO, "Initiating XMLRPC for call (ID " STR_FORMAT_M ", tag " STR_FORMAT_M ") "
+					"to %s",
+					STR_FMT_M(call_id), STR_FMT_M(tag), url);
 		else
-			ilog(LOG_INFO, "Initiating XMLRPC for call (ID " STR_FORMAT_M ")", STR_FMT_M(call_id));
+			ilog(LOG_INFO, "Initiating XMLRPC for call (ID " STR_FORMAT_M ") to %s",
+					STR_FMT_M(call_id), url);
 
 		g_autoptr(GString) body = g_string_new("");
 		g_autoptr(GString) response = g_string_new("");
@@ -482,8 +485,12 @@ void kill_calls_timer(GSList *list, const char *url) {
 			str cb_addr;
 			if (ca->xmlrpc_callback.len)
 				cb_addr = ca->xmlrpc_callback;
-			else
+			else {
 				cb_addr = ca->created_from;
+				char *colon = memrchr(cb_addr.s, ':', cb_addr.len);
+				if (colon)
+					cb_addr.len = (colon - cb_addr.s);
+			}
 
 			snprintf(url_buf, sizeof(url_buf), "%s" STR_FORMAT "%s",
 					url_prefix, STR_FMT(&cb_addr),
@@ -2749,14 +2756,9 @@ static void __call_monologue_init_from_flags(struct call_monologue *ml, struct c
 
 	/* consume sdp session parts */
 	{
-		/* for cases with origin replacements, keep the very first used origin */
-		if (other_ml && !other_ml->session_last_sdp_orig && flags->session_sdp_orig.parsed)
-			other_ml->session_last_sdp_orig = sdp_orig_dup(&flags->session_sdp_orig);
-
 		/* origin (name, version etc.) */
 		if (flags->session_sdp_orig.parsed) {
-			sdp_orig_free(ml->session_sdp_orig);
-			ml->session_sdp_orig = sdp_orig_dup(&flags->session_sdp_orig);
+			ml->sdp_orig_in = sdp_orig_dup(&flags->session_sdp_orig);
 		}
 
 		/* sdp session name */
@@ -2846,20 +2848,26 @@ static void __call_monologue_init_from_flags(struct call_monologue *ml, struct c
 }
 
 __attribute__((nonnull(1, 2)))
-static void media_set_siprec_label(struct call_media *other_media, struct call_media *media,
-		sdp_ng_flags *flags)
+static void media_set_siprec_label(struct call_media *media, sdp_ng_flags *flags, unsigned int id)
 {
 	if (!flags->siprec)
 		return;
 
-	if (!media->label.len) {
-		char buf[64];
-		snprintf(buf, sizeof(buf), "%u", other_media->unique_id);
-		media->label = call_str_cpy_c(buf);
-	}
-	// put same label on both sides
-	if (!other_media->label.len)
-		other_media->label = media->label;
+	if (media->label.len)
+		return;
+
+	char buf[64];
+	snprintf(buf, sizeof(buf), "%u", id);
+	media->label = call_str_cpy_c(buf);
+}
+
+__attribute__((nonnull(1, 2)))
+static void media_update_label(struct call_media *media, sdp_ng_flags *flags, const str *label)
+{
+	if (flags->siprec) // we generate our own
+		return;
+
+	media->label = call_str_cpy(label);
 }
 
 __attribute__((nonnull(1)))
@@ -3873,6 +3881,7 @@ int monologue_offer_answer(struct call_monologue *monologues[2], sdp_streams_q *
 		}
 		else
 			media_answer_media_id(sender_media, sp);
+		media_update_label(receiver_media, flags, &sp->label);
 		media_loop_protect(sp, sender_media);
 		media_update_flags(sender_media, sp);
 		media_update_crypto(sender_media, sp, flags);
@@ -4038,7 +4047,9 @@ void media_subscriptions_clear(subscription_q *q) {
 	i_queue_clear_full(q, media_subscription_free);
 }
 
-static void __unsubscribe_media_link(struct call_media *which, struct media_subscription *ms)
+__attribute__((nonnull(1, 2)))
+static inline void __unsubscribe_media_link_store(struct call_media *which, struct media_subscription *ms,
+		subscription_store_ht ht)
 {
 	struct media_subscription *rev_ms = ms->reverse;
 	struct call_media *from = ms->media;
@@ -4055,11 +4066,23 @@ static void __unsubscribe_media_link(struct call_media *which, struct media_subs
 	t_hash_table_remove(from->media_subscribers_ht, rev_ms->media);
 
 	g_free(ms);
-	g_free(rev_ms);
+
+	if (t_hash_table_is_set(ht))
+		t_hash_table_insert(ht, from, rev_ms);
+	else
+		g_free(rev_ms);
 }
+
+__attribute__((nonnull(1, 2)))
+static void __unsubscribe_media_link(struct call_media *which, struct media_subscription *ms)
+{
+	__unsubscribe_media_link_store(which, ms, subscription_store_ht_null());
+}
+
 /**
  * Unsubscribe one particular media subscriber from this call media.
  */
+__attribute__((nonnull(1, 2)))
 bool __unsubscribe_media(struct call_media *which, struct call_media *from)
 {
 	if (!t_hash_table_is_set(which->media_subscriptions_ht)
@@ -4086,7 +4109,6 @@ bool __unsubscribe_media(struct call_media *which, struct call_media *from)
  */
 __attribute__((nonnull(1, 2)))
 static void __unsubscribe_all_offer_answer_medias(struct call_media *cm, medias_q *medias) {
-	IQUEUE_FOREACH_SAFE_DECL(&cm->media_subscribers, ms);
 	IQUEUE_FOREACH_SAFE(&cm->media_subscribers, ms) {
 		if (!ms->attrs.offer_answer)
 			continue;
@@ -4099,24 +4121,27 @@ static void __unsubscribe_all_offer_answer_medias(struct call_media *cm, medias_
 		__unsubscribe_media(cm, other_cm);
 	}
 }
-static void __unsubscribe_medias_from_all(struct call_monologue *ml) {
+
+__attribute__((nonnull(1)))
+static inline void __unsubscribe_medias_from_all(struct call_monologue *ml, subscription_store_ht ht)
+{
 	for (int i = 0; i < ml->medias->len; i++)
 	{
-		struct call_media * media = ml->medias->pdata[i];
+		struct call_media *media = ml->medias->pdata[i];
 		if (!media)
 			continue;
 
-		IQUEUE_FOREACH_SAFE_DECL(&media->media_subscriptions, subscription);
 		IQUEUE_FOREACH_SAFE(&media->media_subscriptions, subscription)
-			__unsubscribe_media_link(media, subscription);
+			__unsubscribe_media_link_store(media, subscription, ht);
 	}
 }
+
 /**
  * Check whether this monologue medias are subscribed to a single other monologue medias.
  */
 struct call_monologue *ml_medias_subscribed_to_single_ml(struct call_monologue *ml) {
 	/* detect monologues multiplicity */
-	struct call_monologue * return_ml = NULL;
+	struct call_monologue *return_ml = NULL;
 	for (unsigned int i = 0; i < ml->medias->len; i++)
 	{
 		struct call_media *media = ml->medias->pdata[i];
@@ -4131,7 +4156,7 @@ struct call_monologue *ml_medias_subscribed_to_single_ml(struct call_monologue *
 	}
 	return return_ml;
 }
-struct media_subscription *__add_media_subscription(struct call_media * which, struct call_media * to,
+struct media_subscription *__add_media_subscription(struct call_media *which, struct call_media *to,
 		const struct sink_attrs *attrs)
 {
 	struct media_subscription *ret;
@@ -4361,9 +4386,9 @@ int monologue_publish(struct call_monologue *ml, sdp_streams_q *streams, sdp_ng_
 }
 
 /* called with call->master_lock held in W */
-__attribute__((nonnull(1, 2, 3, 4)))
+__attribute__((nonnull(1, 2, 3)))
 static int monologue_subscribe_request1(struct call_media *src_media, struct call_monologue *dst_ml,
-		sdp_ng_flags *flags, unsigned int *index)
+		sdp_ng_flags *flags, subscription_store_ht ht)
 {
 	unsigned int idx_diff = 0, rev_idx_diff = 0;
 	g_auto(str_ht) mid_tracker_dst = str_ht_new();
@@ -4371,8 +4396,16 @@ static int monologue_subscribe_request1(struct call_media *src_media, struct cal
 
 	struct stream_params *sp = &src_media->sp;
 
-	struct call_media *dst_media = call_get_media(dst_ml, &src_media->type, src_media->type_id,
-			NULL, false, (*index)++, mid_tracker_dst);
+	// check if we have a matching existing subscription
+	struct call_media *dst_media = NULL;
+	__auto_type ms = t_hash_table_lookup(ht, src_media);
+	if (ms)
+		dst_media = ms->media;
+	if (!dst_media) {
+		// new media needed
+		dst_media = call_get_media(dst_ml, &src_media->type, src_media->type_id,
+				NULL, false, dst_ml->medias->len + 1, mid_tracker_dst);
+	}
 
 	/* subscribe dst_ml (subscriber) to src_ml, don't forget to carry the egress flag, if required */
 	__add_media_subscription(dst_media, src_media, &(struct sink_attrs) { .egress = !!flags->egress });
@@ -4391,7 +4424,8 @@ static int monologue_subscribe_request1(struct call_media *src_media, struct cal
 	media_init_from_flags(dst_media, flags);
 	media_set_echo(src_media, flags);
 	media_set_echo_reverse(dst_media, flags);
-	media_set_siprec_label(src_media, dst_media, flags);
+	media_set_siprec_label(dst_media, flags, src_media->unique_id);
+	media_update_label(dst_media, flags, &src_media->label);
 	media_update_type(dst_media, sp);
 	media_set_protocol(dst_media, src_media, sp, flags);
 	media_gen_media_id(dst_media, flags);
@@ -4448,12 +4482,13 @@ static int monologue_subscribe_request1(struct call_media *src_media, struct cal
 
 	return 0;
 }
+
 /* called with call->master_lock held in W */
 __attribute__((nonnull(1, 2, 3)))
 int monologue_subscribe_request(const subscription_q *srms, struct call_monologue *dst_ml, sdp_ng_flags *flags) {
-	unsigned int index = 1; /* running counter for output/dst medias */
+	g_auto(subscription_store_ht) ht = subscription_store_ht_new();
 
-	__unsubscribe_medias_from_all(dst_ml);
+	__unsubscribe_medias_from_all(dst_ml, ht);
 	__call_monologue_init_from_flags(dst_ml, NULL, flags);
 
 	IQUEUE_FOREACH(srms, ms) {
@@ -4461,14 +4496,9 @@ int monologue_subscribe_request(const subscription_q *srms, struct call_monologu
 		if (!src_media)
 			continue;
 
-		int ret = monologue_subscribe_request1(src_media, dst_ml, flags, &index);
+		int ret = monologue_subscribe_request1(src_media, dst_ml, flags, ht);
 		if (ret)
 			return -1;
-
-		/* update last used origin: copy from source to the dest monologue */
-		struct call_monologue *src_ml = src_media->monologue;
-		if (src_ml->session_last_sdp_orig && !dst_ml->session_last_sdp_orig)
-			dst_ml->session_last_sdp_orig = sdp_orig_dup(src_ml->session_last_sdp_orig);
 	}
 
 	monologue_media_start(dst_ml);
@@ -4573,7 +4603,6 @@ int monologue_unsubscribe(struct call_monologue *dst_ml, sdp_ng_flags *flags) {
 		__media_unconfirm(media, "media unsubscribe");
 
 		/* TODO: should we care about subscribers as well? */
-		IQUEUE_FOREACH_SAFE_DECL(&media->media_subscriptions, ms);
 		IQUEUE_FOREACH_SAFE(&media->media_subscriptions, ms) {
 			struct call_media *src_media = ms->media;
 
@@ -4587,6 +4616,197 @@ int monologue_unsubscribe(struct call_monologue *dst_ml, sdp_ng_flags *flags) {
 
 	monologue_destroy(dst_ml);
 
+	return 0;
+}
+
+static bool inject_media_types_match(const struct call_media *src_media, const struct call_media *dst_media) {
+	if (!src_media || !dst_media)
+		return false;
+	if (src_media->type_id != MT_AUDIO || dst_media->type_id != MT_AUDIO)
+		return false;
+	return !str_cmp_str(&src_media->type, &dst_media->type);
+}
+
+static struct call_media *inject_find_destination_media(struct call_media *src_media,
+		struct call_monologue *dst_ml)
+{
+	struct call_media *dst_media = NULL;
+
+	if (src_media->media_id.len) {
+		dst_media = t_hash_table_lookup(dst_ml->media_ids, &src_media->media_id);
+		if (inject_media_types_match(src_media, dst_media))
+			return dst_media;
+	}
+
+	// best-effort match by index
+	if (src_media->index > 0 && src_media->index <= dst_ml->medias->len) {
+		dst_media = dst_ml->medias->pdata[src_media->index - 1];
+		if (inject_media_types_match(src_media, dst_media))
+			return dst_media;
+	}
+
+	// fallback to first same media type
+	for (unsigned int i = 0; i < dst_ml->medias->len; i++) {
+		dst_media = dst_ml->medias->pdata[i];
+		if (inject_media_types_match(src_media, dst_media))
+			return dst_media;
+	}
+
+	return NULL;
+}
+
+static bool media_has_inject_subscriptions(const struct call_media *media) {
+	IQUEUE_FOREACH(&media->media_subscriptions, ms) {
+		if (ms->attrs.inject)
+			return true;
+	}
+	return false;
+}
+
+static void inject_set_subscription_attrs(struct media_subscription *ms) {
+	if (!ms)
+		return;
+	ms->attrs.inject = true;
+	ms->attrs.offer_answer = false;
+	ms->attrs.egress = false;
+	ms->attrs.rtcp_only = false;
+}
+
+static void inject_reconfigure_destination_media(struct call_media *dst_media,
+		bool force_audio_player, const sdp_ng_flags *flags)
+{
+	g_auto(sdp_ng_flags) local_flags;
+	bool reconfigured = false;
+	call_ng_flags_init(&local_flags, flags ? flags->opmode : OP_OTHER);
+	local_flags.audio_player = force_audio_player ? AP_FORCE : AP_OFF;
+	if (flags)
+		local_flags.allow_asymmetric_codecs = flags->allow_asymmetric_codecs;
+
+	IQUEUE_FOREACH(&dst_media->media_subscriptions, ms) {
+		struct call_media *src_media = ms->media;
+		if (!inject_media_types_match(src_media, dst_media))
+			continue;
+
+		codec_handlers_update(src_media, dst_media,
+				.flags = &local_flags,
+				.allow_asymmetric = !!local_flags.allow_asymmetric_codecs,
+				.reset_transcoding = true);
+		reconfigured = true;
+	}
+
+	if (force_audio_player)
+		audio_player_activate(dst_media);
+	else if (!reconfigured) {
+		MEDIA_CLEAR(dst_media, AUDIO_PLAYER);
+		audio_player_stop(dst_media);
+	}
+}
+
+/* called with call->master_lock held in W */
+int monologue_inject_start(struct call_monologue *src_ml, struct call_monologue *dst_ml, sdp_ng_flags *flags) {
+	bool has_candidates = false;
+	bool linked = false;
+
+	for (unsigned int i = 0; i < src_ml->medias->len; i++) {
+		struct call_media *src_media = src_ml->medias->pdata[i];
+		if (!src_media || src_media->type_id != MT_AUDIO)
+			continue;
+
+		struct call_media *dst_media = inject_find_destination_media(src_media, dst_ml);
+		if (!dst_media)
+			continue;
+
+		has_candidates = true;
+
+		struct media_subscription *existing_ms =
+			call_get_media_subscription(dst_media->media_subscriptions_ht, src_media);
+		if (existing_ms && !existing_ms->attrs.inject) {
+			ilog(LOG_WARN, "Inject failed for destination tag '" STR_FORMAT_M "': "
+					"media pair %d <- %d already has non-inject subscription",
+					STR_FMT_M(&dst_ml->tag), dst_media->index, src_media->index);
+			return -1;
+		}
+	}
+
+	if (!has_candidates)
+		return -1;
+
+	for (unsigned int i = 0; i < src_ml->medias->len; i++) {
+		struct call_media *src_media = src_ml->medias->pdata[i];
+		if (!src_media || src_media->type_id != MT_AUDIO)
+			continue;
+
+		struct call_media *dst_media = inject_find_destination_media(src_media, dst_ml);
+		if (!dst_media)
+			continue;
+
+		struct media_subscription *dst_to_src_ms =
+			call_get_media_subscription(dst_media->media_subscriptions_ht, src_media);
+		if (!dst_to_src_ms) {
+			__add_media_subscription(dst_media, src_media, &(struct sink_attrs) { .inject = true });
+			dst_to_src_ms = call_get_media_subscription(dst_media->media_subscriptions_ht, src_media);
+		}
+		if (!dst_to_src_ms)
+			continue;
+
+		inject_set_subscription_attrs(dst_to_src_ms);
+
+		linked = true;
+	}
+
+	if (!linked)
+		return -1;
+
+	for (unsigned int i = 0; i < dst_ml->medias->len; i++) {
+		struct call_media *dst_media = dst_ml->medias->pdata[i];
+		if (!dst_media || dst_media->type_id != MT_AUDIO)
+			continue;
+		if (!media_has_inject_subscriptions(dst_media))
+			continue;
+		inject_reconfigure_destination_media(dst_media, true, flags);
+	}
+
+	update_init_monologue_subscribers(dst_ml, flags->opmode);
+	return 0;
+}
+
+/* called with call->master_lock held in W */
+int monologue_inject_stop(struct call_monologue *src_ml, struct call_monologue *dst_ml, sdp_ng_flags *flags) {
+	bool removed_any = false;
+
+	for (unsigned int i = 0; i < dst_ml->medias->len; i++) {
+		struct call_media *dst_media = dst_ml->medias->pdata[i];
+		bool removed_from_media = false;
+
+		if (!dst_media || dst_media->type_id != MT_AUDIO)
+			continue;
+
+		IQUEUE_FOREACH_SAFE(&dst_media->media_subscriptions, ms) {
+			struct call_media *src_media = ms->media;
+			if (!src_media)
+				continue;
+			if (!ms->attrs.inject)
+				continue;
+			if (ms->monologue != src_ml)
+				continue;
+
+			if (!__unsubscribe_media(dst_media, src_media))
+				continue;
+
+			removed_any = true;
+			removed_from_media = true;
+		}
+
+		if (removed_from_media) {
+			bool still_injected = media_has_inject_subscriptions(dst_media);
+			inject_reconfigure_destination_media(dst_media, still_injected, flags);
+		}
+	}
+
+	if (!removed_any)
+		return -1;
+
+	update_init_monologue_subscribers(dst_ml, flags->opmode);
 	return 0;
 }
 
@@ -5044,8 +5264,6 @@ void __monologue_free(struct call_monologue *m) {
 	t_hash_table_destroy(m->media_ids);
 	if (m->last_out_sdp)
 		g_string_free(m->last_out_sdp, TRUE);
-	sdp_orig_free(m->session_sdp_orig);
-	sdp_orig_free(m->session_last_sdp_orig);
 	t_queue_clear_full(&m->generic_attributes, sdp_attr_free);
 	t_queue_clear_full(&m->all_attributes, sdp_attr_free);
 	t_queue_clear(&m->tag_aliases);

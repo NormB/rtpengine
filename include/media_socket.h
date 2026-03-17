@@ -101,7 +101,7 @@ struct socket_port_link {
 	IQUEUE_LINK link;
 };
 
-typedef IQUEUE_TYPE(struct socket_port_link, link) socket_port_q;
+typedef IQUEUE(struct socket_port_link, link) socket_port_q;
 
 
 TYPED_GQUEUE(port_pool, struct port_pool)
@@ -261,6 +261,7 @@ struct sink_attrs {
 	bool rtcp_only:1;
 	bool transcoding:1;
 	bool egress:1;
+	bool inject:1;
 };
 
 struct rtpext_printer {
@@ -292,7 +293,7 @@ struct rtp_extension_data {
 	str content;
 };
 
-typedef IQUEUE_TYPE(struct rtp_extension_data, link) extmap_data_q;
+typedef IQUEUE(struct rtp_extension_data, link) extmap_data_q;
 
 
 struct media_packet {

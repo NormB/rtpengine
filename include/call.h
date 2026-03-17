@@ -66,6 +66,7 @@ enum message_type {
 		 || (opmode == OP_START_FORWARDING || opmode == OP_STOP_FORWARDING)              \
 		 || (opmode == OP_UNSUBSCRIBE || opmode == OP_START_RECORDING)                   \
 		 || (opmode == OP_STOP_RECORDING || opmode == OP_PAUSE_RECORDING)                \
+		 || (opmode == OP_INJECT_START || opmode == OP_INJECT_STOP)                      \
 		 || (opmode == OP_OTHER))
 
 #define IS_OP_DIRECTIONAL(opmode)                                                                \
@@ -384,6 +385,7 @@ struct stream_params {
 	struct session_bandwidth media_session_bandiwdth;
 	str			sdp_information;
 	extmap_q		extmap;
+	str			label;
 };
 
 struct endpoint_map {
@@ -488,7 +490,7 @@ struct media_subscription {
 	struct media_subscription *reverse;	// opposite (subscription -> subscriber / vice versa)
 };
 
-typedef IQUEUE_TYPE(struct media_subscription, link) subscription_q;
+typedef IQUEUE(struct media_subscription, link) subscription_q;
 
 
 
@@ -522,7 +524,7 @@ struct call_media {
 	const struct extmap_ops	*extmap_ops;
 
 	str			media_id;
-	str			label;
+	str			label;				// outgoing a=label:
 	struct call_media	*bundle;
 	pt_media_ht		pt_media;
 	sdes_q			sdes_in, sdes_out;
@@ -627,8 +629,8 @@ struct call_monologue {
 	struct session_bandwidth sdp_session_bandwidth;
 	GString			*last_out_sdp;
 
-	sdp_origin * session_sdp_orig;	/* actual origin belonging to this monologue */
-	sdp_origin * session_last_sdp_orig;	/* previously used origin by other other side */
+	sdp_origin		sdp_orig_in;	/* actual origin belonging to this monologue */
+	sdp_origin		sdp_orig_out;	/* previously used origin by other other side */
 
 	str			sdp_session_name;
 	str			sdp_session_timing;
@@ -852,8 +854,8 @@ struct media_subscription *__add_media_subscription(struct call_media * which, s
 bool __unsubscribe_media(struct call_media * which, struct call_media * from);
 struct media_subscription *call_ml_get_top_ms(struct call_monologue *ml);
 bool call_ml_sendonly_inactive(struct call_monologue *ml);
-struct media_subscription *call_media_get_top_ms(struct call_media * cm);
-struct media_subscription *call_get_media_subscription(subscription_ht ht, struct call_media * cm);
+struct media_subscription *call_media_get_top_ms(struct call_media *cm);
+struct media_subscription *call_get_media_subscription(subscription_ht ht, struct call_media *cm);
 struct call_monologue *ml_medias_subscribed_to_single_ml(struct call_monologue *ml);
 
 __attribute__((nonnull(1)))
@@ -896,6 +898,10 @@ int monologue_subscribe_request(const subscription_q *srms, struct call_monologu
 int monologue_subscribe_answer(struct call_monologue *dst, sdp_ng_flags *flags,
 		sdp_streams_q *streams);
 int monologue_unsubscribe(struct call_monologue *dst, sdp_ng_flags *);
+int monologue_inject_start(struct call_monologue *src, struct call_monologue *dst,
+		sdp_ng_flags *flags);
+int monologue_inject_stop(struct call_monologue *src, struct call_monologue *dst,
+		sdp_ng_flags *flags);
 void dialogue_connect(struct call_monologue *, struct call_monologue *, sdp_ng_flags *);
 bool monologue_transform(struct call_monologue *, sdp_ng_flags *, medias_q *);
 void monologue_destroy(struct call_monologue *ml);
@@ -925,6 +931,11 @@ void __rtp_stats_update(rtp_stats_ht dst, struct codec_store *);
 bool __init_stream(struct packet_stream *ps);
 
 const rtp_payload_type *__rtp_stats_codec(struct call_media *m);
+
+
+TYPED_GHASHTABLE(subscription_store_ht, struct call_media, struct media_subscription,
+		media_direct_hash, media_direct_eq, NULL, media_subscription_free)
+
 
 #include "str.h"
 #include "rtp.h"
