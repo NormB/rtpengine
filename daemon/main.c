@@ -680,6 +680,7 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 	int timeout = 0;
 	int final_timeout = 0;
 	int offer_timeout = 0;
+	int unidirectional_timeout = 0;
 	int delete_delay = 30;
 	int media_expire = 0;
 	int db_expire = 0;
@@ -724,6 +725,7 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		{ "silent-timeout",'s',0,G_OPTION_ARG_INT,	&silent_timeout,	"RTP timeout for muted",	"SECS"		},
 		{ "final-timeout",'a',0,G_OPTION_ARG_INT,	&final_timeout,		"Call timeout",			"SECS"		},
 		{ "offer-timeout",0,0,	G_OPTION_ARG_INT,	&offer_timeout,		"Timeout for incomplete one-sided calls",	"SECS"		},
+		{ "unidirectional-timeout",0,0,G_OPTION_ARG_INT,&unidirectional_timeout,"RTP timeout for any single direction (0 = disabled; opt-in per call via ng flag)","SECS"		},
 		{ "port-min",	'm', 0, G_OPTION_ARG_INT,	&rtpe_config.port_min,	"Lowest port to use for RTP",	"INT"		},
 		{ "port-max",	'M', 0, G_OPTION_ARG_INT,	&rtpe_config.port_max,	"Highest port to use for RTP",	"INT"		},
 		{ "redis",	'r', 0, G_OPTION_ARG_STRING,	&redisps,	"Connect to Redis database",	"[PW@]IP:PORT/INT"	},
@@ -1140,6 +1142,10 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 	rtpe_config.final_timeout_us = final_timeout * 1000000LL;
 	if (rtpe_config.final_timeout_us <= 0)
 		rtpe_config.final_timeout_us = 0;
+
+	rtpe_config.unidirectional_timeout_us = (int64_t)unidirectional_timeout * 1000000LL;
+	if (rtpe_config.unidirectional_timeout_us < 0)
+		rtpe_config.unidirectional_timeout_us = 0;
 
 	rtpe_config.delete_delay_us = delete_delay * 1000000LL;
 	if (rtpe_config.delete_delay_us < 0)

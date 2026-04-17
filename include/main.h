@@ -103,6 +103,7 @@ enum endpoint_learning {
 	X(timeout_us) \
 	X(final_timeout_us) \
 	X(offer_timeout_us) \
+	X(unidirectional_timeout_us) \
 	X(delete_delay_us) \
 	X(media_expire_us) \
 	X(db_expire_us) \
