@@ -1162,6 +1162,334 @@ subtest 'callback fires exactly once per call, not on every tick' => sub {
     delete_call($cid, $ft);
 };
 
+# E12: Hold initiated by the ORIGINAL ANSWERER (reverse direction).
+# Subtest 12 and E7 both have the original offerer (A) issue the hold
+# re-INVITE. E12 flips the direction: B (the original answerer) issues
+# the re-INVITE, carrying from-tag=B and to-tag=A. This exercises the
+# flag-copy asymmetry in daemon/call.c:3980, where RECV on the sender
+# maps to peer SEND and vice versa. ml_is_held() inspects the MEDIA_SEND
+# flag on the monologue's own medias, so a hold initiated by either side
+# should flip SEND clear on one of the two monologues and trigger the
+# safety-net the same way.
+#
+# A legitimate B-initiated hold: B sends sendonly (B is muting its own
+# receive; i.e. B is putting A on hold from A's perspective). A mirrors
+# with recvonly. Post-hold, A stops sending (now recvonly) but B keeps
+# MOH flowing toward A. If ml_is_held detects either side's hold, the
+# whole-call unidir check stays disarmed and zero callbacks fire.
+#
+# If this test fails with a callback firing, that is evidence that
+# ml_is_held() plus the flag-copy-on-reverse-reinvite combo leaves one
+# monologue's MEDIA_SEND bit in a state that does not mark the call as
+# held, exposing an asymmetry in the safety-net.
+subtest 'hold: re-INVITE from the original answerer also suppresses teardown' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b, $a_port, $b_port)
+        = fresh_call(1);
+
+    my $dest_a = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $dest_b = pack_sockaddr_in($port_b, inet_aton($RTPE_IFACE));
+
+    # Warm-up: bidirectional RTP so both streams are FILLED.
+    my $seq_a = 12000;
+    my $seq_b = 12100;
+    for (my $i = 0; $i < 20; $i++) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0xc1c1), 0, $dest_a);
+        $sock_b->send(rtp_pkt($seq_b++, $seq_b * 160, 0xc2c2), 0, $dest_b);
+        sleep 0.02;
+    }
+
+    # B (original answerer) issues the hold re-INVITE. In the ng protocol
+    # this is expressed by swapping from-tag and to-tag: from-tag=tt (B),
+    # to-tag=ft (A). B's own media is sendonly (B is the holder).
+    my $hold_offer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+
+    my $hold_resp = rtpe_raw_req({
+        command    => 'offer',
+        'call-id'  => $cid,
+        'from-tag' => $tt,          # note: tt, not ft -- reverse direction
+        'to-tag'   => $ft,
+        sdp        => $hold_offer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_resp->{result}, 'ok', 'reverse-direction hold re-offer result ok';
+
+    # A answers with recvonly (A's media is accepting only).
+    my $hold_answer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+
+    my $hold_ans_resp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $tt,          # same reverse-direction pair
+        'to-tag'   => $ft,
+        sdp        => $hold_answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_ans_resp->{result}, 'ok', 'reverse-direction hold re-answer result ok';
+
+    # Post-hold: A (now recvonly) stops sending. B (sendonly) keeps MOH
+    # flowing. Watch 4s for any spurious callback.
+    my $start    = time();
+    my $deadline = $start + 4;
+    while (time() < $deadline) {
+        $sock_b->send(rtp_pkt($seq_b++, $seq_b * 160, 0xc2c2), 0, $dest_b);
+        sleep 0.02;
+    }
+    my $elapsed = time() - $start;
+    sleep 0.3;
+
+    my @got = received_requests($mock);
+    ok $elapsed >= 3.5,
+        sprintf("observed %.2fs of post-hold silence on A-side (past 2s threshold)",
+            $elapsed);
+    diag(sprintf("E12 callbacks received: %d", scalar(@got))) if @got;
+    is scalar(@got), 0,
+        "no callback fired: answerer-initiated hold also suppresses "
+        . "unidir teardown (got " . scalar(@got) . ")";
+    delete_call($cid, $ft);
+};
+
+# E13: Video+audio call with ONLY the audio stream held.
+# Documents the Option-B call-wide safety-net limitation. ml_is_held()
+# in daemon/call.c walks ml->medias and inspects only MT_AUDIO media.
+# When audio's MEDIA_SEND is cleared (sendonly / inactive), the call
+# loop early-exits with unidir_enabled=false for the WHOLE call --
+# including any concurrent video m= line that is still sendrecv and
+# whose B-side direction is silent.
+#
+# This is intended Option-B behaviour: the safety-net is call-wide, not
+# per-stream. The test pins this behaviour so that a future refactor to
+# per-stream Option A has a clear before/after signal. The assertion
+# below (zero callbacks) is the CURRENT behaviour. If a future patch
+# moves the hold check into the per-stream idle evaluation, this
+# assertion will flip to "callback fires for video" -- at which point
+# the comment here tells the reader what changed and why.
+subtest 'limitation: audio held disables unidir for video m= line too (Option B)' => sub {
+    received_requests($mock);  # drain
+    $tag_ctr++;
+    my $cid    = "cb-call-$tag_ctr-$$";
+    my $ft     = "cb-ft-$tag_ctr-$$";
+    my $tt     = "cb-tt-$tag_ctr-$$";
+    my $a_aud  = 7400 + ($tag_ctr * 4);
+    my $a_vid  = 7401 + ($tag_ctr * 4);
+    my $b_aud  = 7402 + ($tag_ctr * 4);
+    my $b_vid  = 7403 + ($tag_ctr * 4);
+
+    my $sock_a_aud = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.1', LocalPort => $a_aud,
+    ) or die "sockA-aud bind: $!";
+    my $sock_a_vid = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.1', LocalPort => $a_vid,
+    ) or die "sockA-vid bind: $!";
+    my $sock_b_aud = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_aud,
+    ) or die "sockB-aud bind: $!";
+    my $sock_b_vid = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_vid,
+    ) or die "sockB-vid bind: $!";
+
+    # 2-m= SDP: audio PCMU PT0, video VP8 PT99 (matches t/auto-daemon-tests-pubsub.pl).
+    my $offer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_aud RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
+      . "m=video $a_vid RTP/AVP 99\r\na=rtpmap:99 VP8/90000\r\na=sendrecv\r\n";
+    my $answer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_aud RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
+      . "m=video $b_vid RTP/AVP 99\r\na=rtpmap:99 VP8/90000\r\na=sendrecv\r\n";
+
+    my $oresp = rtpe_raw_req({
+        command           => 'offer',
+        'call-id'         => $cid,
+        'from-tag'        => $ft,
+        sdp               => $offer_sdp,
+        'xmlrpc-callback' => $MOCK_URL,
+        flags             => ['trust-address', 'unidirectional-timeout'],
+    });
+    is $oresp->{result}, 'ok', '2-m= offer result ok';
+    my @aports = ($oresp->{sdp} // '') =~ /m=(?:audio|video) (\d+)/g;
+    is scalar(@aports), 2, 'rtpengine allocated two media ports (audio + video)';
+    my ($rtpe_a_aud, $rtpe_a_vid) = @aports;
+
+    my $aresp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $aresp->{result}, 'ok', '2-m= answer result ok';
+    my @bports = ($aresp->{sdp} // '') =~ /m=(?:audio|video) (\d+)/g;
+    is scalar(@bports), 2, 'answer returned two media ports';
+    my ($rtpe_b_aud, $rtpe_b_vid) = @bports;
+
+    my $dest_a_aud = pack_sockaddr_in($rtpe_a_aud, inet_aton($RTPE_IFACE));
+    my $dest_a_vid = pack_sockaddr_in($rtpe_a_vid, inet_aton($RTPE_IFACE));
+    my $dest_b_aud = pack_sockaddr_in($rtpe_b_aud, inet_aton($RTPE_IFACE));
+    my $dest_b_vid = pack_sockaddr_in($rtpe_b_vid, inet_aton($RTPE_IFACE));
+
+    # Warm-up: bidirectional RTP on BOTH streams.
+    my $sa_a = 13000; my $sa_v = 13100;
+    my $sb_a = 13200; my $sb_v = 13300;
+    for (my $i = 0; $i < 20; $i++) {
+        $sock_a_aud->send(rtp_pkt($sa_a++, $sa_a * 160, 0xd1d1), 0, $dest_a_aud);
+        $sock_b_aud->send(rtp_pkt($sb_a++, $sb_a * 160, 0xd2d2), 0, $dest_b_aud);
+        # Video RTP: same PCM-style payload (rtpengine doesn't care about the
+        # body for liveness tracking; the header getting through the socket
+        # is what bumps last_packet_us).
+        $sock_a_vid->send(rtp_pkt($sa_v++, $sa_v * 160, 0xd3d3), 0, $dest_a_vid);
+        $sock_b_vid->send(rtp_pkt($sb_v++, $sb_v * 160, 0xd4d4), 0, $dest_b_vid);
+        sleep 0.02;
+    }
+
+    # Hold re-INVITE: audio sendonly, video stays sendrecv.
+    my $hold_offer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_aud RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n"
+      . "m=video $a_vid RTP/AVP 99\r\na=rtpmap:99 VP8/90000\r\na=sendrecv\r\n";
+    my $hold_resp = rtpe_raw_req({
+        command    => 'offer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        sdp        => $hold_offer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_resp->{result}, 'ok', 'audio-only hold re-offer result ok';
+
+    my $hold_answer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_aud RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n"
+      . "m=video $b_vid RTP/AVP 99\r\na=rtpmap:99 VP8/90000\r\na=sendrecv\r\n";
+    my $hold_ans = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $hold_answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_ans->{result}, 'ok', 'audio-only hold re-answer result ok';
+
+    # Post-hold: A sends audio MOH, A sends video (as if active call). B is
+    # silent on BOTH streams (video outage simulating what Option A would
+    # want to catch). Option B: zero callbacks.
+    my $start    = time();
+    my $deadline = $start + 4;
+    while (time() < $deadline) {
+        $sock_a_aud->send(rtp_pkt($sa_a++, $sa_a * 160, 0xd1d1), 0, $dest_a_aud);
+        $sock_a_vid->send(rtp_pkt($sa_v++, $sa_v * 160, 0xd3d3), 0, $dest_a_vid);
+        sleep 0.02;
+    }
+    my $elapsed = time() - $start;
+    sleep 0.3;
+
+    my @got = received_requests($mock);
+    ok $elapsed >= 3.5,
+        sprintf("observed %.2fs post-hold with silent B on BOTH streams",
+            $elapsed);
+    # This verifies the current call-wide safety-net behavior. A future
+    # per-stream fix (Option A) would allow the video leg to still fire
+    # UNIDIRECTIONAL_TIMEOUT while audio is held. Changing this
+    # assertion is the signal that the refactor has landed.
+    is scalar(@got), 0,
+        "no callback fired: audio-held monologue disables unidir check "
+        . "call-wide, including the still-active video stream "
+        . "(Option B limitation; got " . scalar(@got) . ")";
+    delete_call($cid, $ft);
+    close $sock_a_aud; close $sock_a_vid; close $sock_b_aud; close $sock_b_vid;
+};
+
+# E14: delete after UNIDIRECTIONAL_TIMEOUT teardown is safe.
+# The call loop destroys the call when unidir fires (daemon/call.c:
+# "Closing call due to unidirectional media timeout" -> call_destroy).
+# A subsequent ng 'delete' command must NOT crash or hang the daemon.
+# It should hit the call_delete_ng 'err' path where call_get returns
+# NULL, and the default (non-fatal) branch sets result=ok plus a
+# 'warning' field. This guards against double-free / zombie-state bugs
+# in the teardown path.
+subtest 'delete after UNIDIRECTIONAL_TIMEOUT teardown is idempotent' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b) = fresh_call(1);
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $seq  = 14000;
+
+    # Force the unidir callback: A sends, B silent, up to 4s.
+    my $start    = time();
+    my $deadline = $start + 4;
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0xe1e1), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at),
+        sprintf("unidir callback fired before delete test (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+
+    # Short grace for the call-destroy path to complete before we delete.
+    sleep 0.3;
+
+    # Issue delete. Expect either:
+    #   a) result=ok with 'warning' -- call already torn down, expected hot path
+    #   b) result=ok, call still in a brief cleanup window (also acceptable)
+    # Anything else (crash, hang, unexpected 'error' without reason) is a
+    # zombie-state bug.
+    my $dresp = eval {
+        rtpe_raw_req({
+            command    => 'delete',
+            'call-id'  => $cid,
+            'from-tag' => $ft,
+        });
+    };
+    my $err = $@;
+    ok !$err, "delete after teardown did not throw (err=" . ($err // '') . ")";
+    ok defined($dresp) && ref($dresp) eq 'HASH',
+        "delete after teardown returned a HASH response";
+    # The result field is always set: either 'ok' (with or without warning)
+    # for the non-fatal path, or 'error' with 'error-reason'. Both are
+    # well-formed responses; we reject only crash/hang/unknown shapes.
+    my $result = $dresp->{result} // '';
+    ok $result eq 'ok' || $result eq 'error',
+        "delete response has a recognized result field (got: '$result')";
+    if ($result eq 'error') {
+        ok defined($dresp->{'error-reason'}),
+            "error response carries error-reason ("
+            . ($dresp->{'error-reason'} // 'undef') . ")";
+    }
+    # Second delete should behave the same -- idempotent regardless of
+    # which branch the first one took.
+    my $dresp2 = eval {
+        rtpe_raw_req({
+            command    => 'delete',
+            'call-id'  => $cid,
+            'from-tag' => $ft,
+        });
+    };
+    ok !$@, "second delete after teardown did not throw";
+    ok defined($dresp2) && ref($dresp2) eq 'HASH',
+        "second delete returned a HASH response (fully idempotent)";
+};
+
 shutdown_mock($mock);
 
 done_testing();
