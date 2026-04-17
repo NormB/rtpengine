@@ -136,6 +136,10 @@ static void call_timer_iterator(call_t *c, struct iterator_helper *hlp) {
 	enum call_stream_state css;
 	int64_t timestamp;
 
+	int64_t unidir_check_us = atomic_get_na(&rtpe_config.unidirectional_timeout_us);
+	bool unidir_enabled = c->unidirectional_timeout_enabled && unidir_check_us > 0;
+	bool any_stream_idle_unidir = false;
+
 	hlp->count++;
 
 	rwlock_lock_r(&c->master_lock);
@@ -187,6 +191,18 @@ static void call_timer_iterator(call_t *c, struct iterator_helper *hlp) {
 
 		if (!ps->media)
 			continue;
+
+		/* Unidirectional timeout: if enabled, flag any single stream that
+		 * has been silent longer than the configured threshold. This runs
+		 * independently of the recv_good aggregation so an active stream
+		 * does not mask an idle sibling. */
+		if (unidir_enabled && !any_stream_idle_unidir
+				&& PS_ISSET(ps, FILLED)
+				&& MEDIA_ISSET(ps->media, RECV)
+				&& timestamp > 0
+				&& rtpe_now > timestamp
+				&& (rtpe_now - timestamp) > unidir_check_us)
+			any_stream_idle_unidir = true;
 
 		g_autoptr(stream_fd) sfd = NULL;
 
@@ -275,7 +291,12 @@ no_sfd:
 		}
 	}
 
-	if (recv_good) {
+	/* Unidirectional timeout overrides the recv_good early-exit: even if
+	 * one stream is active, an idle sibling forces teardown when the
+	 * per-call flag is set. */
+	bool unidir_fire = unidir_enabled && any_stream_idle_unidir;
+
+	if (recv_good && !unidir_fire) {
 		if (IS_FOREIGN_CALL(c))
 			goto out;
 
@@ -289,13 +310,17 @@ no_sfd:
 	if (c->ml_deleted_us)
 		goto out;
 
+	if (unidir_fire)
+		tmp_t_reason = UNIDIRECTIONAL_TIMEOUT;
+
 	for (__auto_type it = c->monologues.head; it; it = it->next) {
 		__auto_type ml = it->data;
 		ml->terminated = rtpe_now;
 		ml->term_reason = tmp_t_reason;
 	}
 
-	ilog(LOG_INFO, "Closing call due to timeout");
+	ilog(LOG_INFO, "Closing call due to %s",
+			unidir_fire ? "unidirectional media timeout" : "timeout");
 
 timeout:
 	hlp->del_timeout = g_slist_prepend(hlp->del_timeout, obj_get(c));

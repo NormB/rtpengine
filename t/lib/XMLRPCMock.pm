@@ -22,6 +22,7 @@ sub start_mock {
             LocalPort => $port,
             ReuseAddr => 1,
         ) or die "HTTP::Daemon on $port: $!";
+        $SIG{TERM} = sub { exit 0 };
         $wr->autoflush(1);
         while (my $c = $d->accept) {
             while (my $r = $c->get_request) {
