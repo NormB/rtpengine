@@ -136,7 +136,10 @@ static void call_timer_iterator(call_t *c, struct iterator_helper *hlp) {
 	enum call_stream_state css;
 	int64_t timestamp;
 
-	int64_t unidir_check_us = atomic_get_na(&rtpe_config.unidirectional_timeout_us);
+	int64_t unidir_global_us = atomic_get_na(&rtpe_config.unidirectional_timeout_us);
+	int64_t unidir_check_us = c->unidirectional_timeout_override_us > 0
+		? c->unidirectional_timeout_override_us
+		: unidir_global_us;
 	bool unidir_enabled = c->unidirectional_timeout_enabled && unidir_check_us > 0;
 	bool any_stream_idle_unidir = false;
 

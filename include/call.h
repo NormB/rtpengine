@@ -802,6 +802,7 @@ struct call {
 	str			created_from;
 	str			xmlrpc_callback;
 	bool			unidirectional_timeout_enabled;
+	int64_t			unidirectional_timeout_override_us;  /* 0 = use rtpe_config global */
 	endpoint_t		dtmf_log_dest;
 
 	int			redis_hosted_db;

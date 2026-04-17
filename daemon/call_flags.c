@@ -238,6 +238,14 @@ INLINE void ng_sdp_media_remove(const ng_parser_t *parser, sdp_ng_flags *flags, 
 	parser->list_iter(parser, value, ng_sdp_media_remove_iter, NULL, flags);
 }
 
+INLINE void ng_unidir_timeout_val(str *s, unsigned int idx, helper_arg arg) {
+	sdp_ng_flags *out = arg.flags;
+	/* already prefix-matched to "unidirectional-timeout=" / "unidirectional timeout=",
+	 * so s is just the numeric remainder */
+	out->unidirectional_timeout = true;
+	out->unidirectional_timeout_s = str_to_i(s, 0);
+}
+
 INLINE void ng_el_option(str *s, unsigned int idx, helper_arg arg) {
 	sdp_ng_flags *out = arg.flags;
 	switch (__csh_lookup(s)) {
@@ -934,6 +942,14 @@ void call_ng_flags_flags(str *s, unsigned int idx, helper_arg arg) {
 
 		default:
 			/* handle values aliases from other dictionaries */
+
+			/* unidirectional-timeout=N / "unidirectional timeout=N":
+			 * enables unidirectional timeout and overrides the global
+			 * --unidirectional-timeout CLI value for this call. */
+			if (call_ng_flags_prefix(s, "unidirectional-timeout=", ng_unidir_timeout_val, out))
+				return;
+			if (call_ng_flags_prefix(s, "unidirectional timeout=", ng_unidir_timeout_val, out))
+				return;
 
 			if (call_ng_flags_prefix(s, "endpoint-learning-", ng_el_option, out))
 				return;

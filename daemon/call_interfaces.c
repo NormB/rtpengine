@@ -663,6 +663,13 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char *addr)
 		call->xmlrpc_callback = call_str_cpy(&flags.xmlrpc_callback);
 	if (flags.unidirectional_timeout)
 		call->unidirectional_timeout_enabled = true;
+	/* Only set the override when this request actually carries a positive
+	 * numeric value. Subsequent requests on the same call (e.g. the answer
+	 * after an offer) don't repeat the flag, so we must not clobber the
+	 * prior value. */
+	if (flags.unidirectional_timeout_s > 0)
+		call->unidirectional_timeout_override_us =
+			(int64_t)flags.unidirectional_timeout_s * 1000000LL;
 	if (flags.dtmf_log_dest.address.family)
 		call->dtmf_log_dest = flags.dtmf_log_dest;
 

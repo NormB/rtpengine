@@ -83,6 +83,7 @@ struct sdp_ng_flags {
 	str_case_value_ht codec_set;
 	int ptime,
 	    rev_ptime;
+	int unidirectional_timeout_s;    /* per-call override in seconds, 0 = use global */
 	str dtls_fingerprint;
 
 	/* keep session level attributes for internal proper parsing */

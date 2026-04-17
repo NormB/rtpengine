@@ -29,7 +29,7 @@ autotest_start(qw(--config-file=none -t -1
 my $tag_ctr = 0;
 
 sub fresh_call {
-    my ($enable_unidir) = @_;
+    my ($enable_unidir, $override_s) = @_;
     $tag_ctr++;
     my $cid = "cb-call-$tag_ctr-$$";
     my $ft  = "cb-ft-$tag_ctr-$$";
@@ -64,7 +64,12 @@ sub fresh_call {
         'xmlrpc-callback' => $MOCK_URL,
         flags             => ['trust-address'],
     };
-    push @{$offer_req->{flags}}, 'unidirectional-timeout' if $enable_unidir;
+    if ($enable_unidir) {
+        my $flag = defined($override_s)
+            ? "unidirectional-timeout=$override_s"
+            : 'unidirectional-timeout';
+        push @{$offer_req->{flags}}, $flag;
+    }
 
     my $oresp = rtpe_raw_req($offer_req);
     is ref($oresp), 'HASH', "offer returned hash (cid=$cid)" or diag "resp=$oresp";
@@ -232,6 +237,79 @@ subtest 'unidirectional: traffic on RTCP sibling suppresses teardown' => sub {
         . scalar(@got) . ")";
     delete_call($cid, $ft);
     close $sock_b_rtcp;
+};
+
+# --- Subtest 6: per-call override=1s fires faster than global 2s ---
+# Daemon is started with --unidirectional-timeout=2. Offering a call with
+# 'unidirectional-timeout=1' must shorten the threshold to 1s for this call
+# only. Discrimination threshold 1.8s: without the override the firing time
+# is bounded below by the 2s global (actual ~2.0-2.2s), so the assertion
+# fails on unpatched code. With the override, firing is ~1.0-1.3s.
+subtest 'override: unidirectional-timeout=1 fires faster than global' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b) = fresh_call(1, 1);
+    my $start = time();
+    my $deadline = $start + 3;
+    my $seq = 4000;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x4444), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at), "callback fired at all (got fired_at=" . ($fired_at // 'undef') . ")";
+    ok defined($fired_at) && $fired_at < 1.8,
+        sprintf("callback fired in %.2fs, under the 2s global threshold",
+            $fired_at // -1);
+    delete_call($cid, $ft);
+};
+
+# --- Subtest 7: per-call override=4s holds past global 2s, still fires by 5s ---
+# Daemon --unidirectional-timeout=2. Override=4 extends the threshold for
+# this call past the global. We assert both halves:
+#   (a) no callback by 3.0s   -> proves the global 2s is NOT what's firing
+#   (b) callback fires by 5s  -> proves override=4 IS armed (not silently dropped)
+# On baseline (unpatched) the "unidirectional-timeout=4" string hits the
+# default arm and logs "Unknown flag" so the unidirectional mechanism never
+# arms at all: (b) would fail (no callback ever). The pair discriminates.
+subtest 'override: unidirectional-timeout=4 holds past 2s, fires by 5s' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b) = fresh_call(1, 4);
+    my $start = time();
+    my $seq = 5000;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+
+    my $fired_at;
+    my $phase_a_ok;  # no callback by 3.0s
+    my $deadline = $start + 6;  # bounded observation window > override
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x5555), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got && !defined $fired_at) {
+            $fired_at = time() - $start;
+        }
+        if (!defined $phase_a_ok && (time() - $start) >= 3.0) {
+            $phase_a_ok = !defined($fired_at);
+        }
+        last if defined $fired_at && defined $phase_a_ok;
+    }
+    ok $phase_a_ok,
+        "no callback fired before 3.0s (override=4 suppresses global 2s)";
+    ok defined($fired_at),
+        sprintf("callback fired at fired_at=%s (override=4 is armed)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    ok defined($fired_at) && $fired_at >= 3.0 && $fired_at <= 5.5,
+        sprintf("fired_at %s is consistent with 4s override (3.0-5.5s window)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'undef');
+    delete_call($cid, $ft);
 };
 
 shutdown_mock($mock);
