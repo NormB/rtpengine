@@ -112,7 +112,8 @@ include ../lib/common.Makefile
 	daemon-tests-transform daemon-tests-http daemon-tests-heuristic daemon-tests-asymmetric \
 	daemon-tests-dtx-no-shift daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext \
 	daemon-tests-bundle daemon-tests-dtls \
-	daemon-tests-recording daemon-tests-create
+	daemon-tests-recording daemon-tests-create \
+	daemon-tests-xmlrpc-callback
 
 TESTS=		test-bitstr aes-crypt aead-aes-crypt test-const_str_hash.strhash
 ifeq ($(with_transcoding),yes)
@@ -161,13 +162,17 @@ daemon-tests: daemon-tests-main daemon-tests-jb daemon-tests-pubsub daemon-tests
 	daemon-tests-transcode-config daemon-tests-codec-prefs daemon-tests-http daemon-tests-heuristic \
 	daemon-tests-asymmetric daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext \
 	daemon-tests-bundle daemon-tests-dtls \
-	daemon-tests-recording daemon-tests-create
+	daemon-tests-recording daemon-tests-create \
+	daemon-tests-xmlrpc-callback
 
 daemon-test-deps:	tests-preload.so
 	$(MAKE) -C ../daemon
 
 daemon-tests-main:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests.pl
+
+daemon-tests-xmlrpc-callback:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl -I./lib auto-daemon-tests-xmlrpc-callback.pl
 
 daemon-tests-jb:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-jb.pl
