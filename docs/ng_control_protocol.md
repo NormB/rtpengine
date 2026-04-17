@@ -1383,6 +1383,39 @@ Spaces in each string may be replaced by hyphens.
 
 	When this flag is present, kernelize also one-way rtp media.
 
+* `unidirectional-timeout` or `unidirectional-timeout=SECS`
+
+	Opt-in per-call flag. When enabled, *rtpengine* terminates the call and
+	fires the configured xmlrpc b2b-url callback if any single RTP direction
+	is silent for longer than the configured threshold, even if the other
+	direction is still carrying media. The normal bidirectional `--timeout`
+	is unaffected.
+
+	The bare flag uses the global `--unidirectional-timeout` CLI option as
+	the threshold. The `=SECS` form overrides the global with a per-call
+	value in seconds. A zero or malformed value falls through to the global
+	and logs a warning.
+
+	A direction is considered alive if any packet, RTP or RTCP, has arrived
+	within the threshold. For non-muxed streams, the paired RTCP sibling is
+	consulted separately so endpoints using silence suppression (DTX), noise
+	cancellation, or mute can keep the call up via RTCP RR alone. For
+	`rtcp-mux`, RTCP arrives on the main stream and contributes to liveness
+	there.
+
+	While any leg of the call is on hold (re-INVITE with `a=sendonly` or
+	`a=inactive`), the check is suspended for the whole call to avoid
+	false-positive teardowns of held callers on MOH. The check resumes when
+	the hold is released.
+
+	On trigger, the monologue termination reason is `UNIDIRECTIONAL_TIMEOUT`,
+	distinct from `TIMEOUT` and `SILENT_TIMEOUT`.
+
+	Intended for detecting dead-air on PSTN trunks and similar scenarios
+	where one-way silence is a genuine fault. Not recommended for
+	consumer-endpoint or contact-center deployments where legitimate silence
+	(speech pauses, hold, mute) is expected.
+
 * `WebRTC`
 
     Shortcut alias for several other flags that must be set when talking to a
