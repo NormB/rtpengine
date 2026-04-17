@@ -393,6 +393,406 @@ subtest 'hold: sendonly re-INVITE does not trigger unidir teardown' => sub {
     delete_call($cid, $ft);
 };
 
+# --- Edge-case subtests (P1: input validation + termination reason) ---
+
+# E1: unidirectional-timeout=0 means "use the global default", not "disabled".
+# call_flags.c:ng_unidir_timeout_val() sets unidirectional_timeout=true
+# unconditionally; only the numeric override requires >0. So =0 behaves
+# exactly like the bare flag, firing at the 2s global threshold.
+subtest 'edge: unidirectional-timeout=0 falls through to global default' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b) = fresh_call(1, 0);
+    my $start = time();
+    my $deadline = $start + 4;
+    my $seq = 8000;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x8080), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at),
+        sprintf("=0 is not silently disabled; callback fired (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    ok defined($fired_at) && $fired_at >= 1.5 && $fired_at <= 3.5,
+        sprintf("=0 uses the 2s global (fired at %s, expected ~2s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'undef');
+    delete_call($cid, $ft);
+};
+
+# E2: unidirectional-timeout=abc -- unparseable.
+# str_to_i returns the fallback (-1), the >0 guard rejects it, the flag
+# stays enabled and falls through to the global 2s. A warning is logged
+# but we do not assert against the log: autotest_start exposes
+# $rtpe_stderr privately, and the task constraint forbids adding
+# log-tailing infrastructure speculatively.
+subtest 'edge: unidirectional-timeout=abc warns and falls through' => sub {
+    received_requests($mock);  # drain
+    $tag_ctr++;
+    my $cid = "cb-call-$tag_ctr-$$";
+    my $ft  = "cb-ft-$tag_ctr-$$";
+    my $tt  = "cb-tt-$tag_ctr-$$";
+    my $a_port = 7400 + ($tag_ctr * 2);
+    my $b_port = 7401 + ($tag_ctr * 2);
+
+    my $sock_a = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.1', LocalPort => $a_port,
+    ) or die "sockA bind: $!";
+    my $sock_b = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_port,
+    ) or die "sockB bind: $!";
+
+    my $offer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    my $answer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+
+    my $oresp = rtpe_raw_req({
+        command           => 'offer',
+        'call-id'         => $cid,
+        'from-tag'        => $ft,
+        sdp               => $offer_sdp,
+        'xmlrpc-callback' => $MOCK_URL,
+        flags             => ['trust-address', 'unidirectional-timeout=abc'],
+    });
+    is ref($oresp), 'HASH', 'offer returned hash (not rejected)';
+    is $oresp->{result}, 'ok', 'offer result ok with garbage value';
+    my ($port_a) = ($oresp->{sdp} // '') =~ /m=audio (\d+)/;
+    ok $port_a, 'A-side port allocated';
+
+    my $aresp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $aresp->{result}, 'ok', 'answer result ok';
+
+    my $start = time();
+    my $deadline = $start + 4;
+    my $seq = 8100;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x8181), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at),
+        sprintf("garbage value still enables the feature (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    ok defined($fired_at) && $fired_at >= 1.5 && $fired_at <= 3.5,
+        sprintf("garbage value falls through to 2s global (fired at %s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'undef');
+    delete_call($cid, $ft);
+    close $sock_a; close $sock_b;
+};
+
+# E3: unidirectional-timeout=-5 -- negative.
+# str_to_i parses "-5" to -5, the >0 guard rejects it, warning logged,
+# fall-through to global 2s. Behaviour is identical to E2.
+subtest 'edge: unidirectional-timeout=-5 warns and falls through' => sub {
+    received_requests($mock);  # drain
+    $tag_ctr++;
+    my $cid = "cb-call-$tag_ctr-$$";
+    my $ft  = "cb-ft-$tag_ctr-$$";
+    my $tt  = "cb-tt-$tag_ctr-$$";
+    my $a_port = 7400 + ($tag_ctr * 2);
+    my $b_port = 7401 + ($tag_ctr * 2);
+
+    my $sock_a = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.1', LocalPort => $a_port,
+    ) or die "sockA bind: $!";
+    my $sock_b = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_port,
+    ) or die "sockB bind: $!";
+
+    my $offer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    my $answer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+
+    my $oresp = rtpe_raw_req({
+        command           => 'offer',
+        'call-id'         => $cid,
+        'from-tag'        => $ft,
+        sdp               => $offer_sdp,
+        'xmlrpc-callback' => $MOCK_URL,
+        flags             => ['trust-address', 'unidirectional-timeout=-5'],
+    });
+    is $oresp->{result}, 'ok', 'offer result ok with negative value';
+    my ($port_a) = ($oresp->{sdp} // '') =~ /m=audio (\d+)/;
+    ok $port_a, 'A-side port allocated';
+
+    my $aresp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $aresp->{result}, 'ok', 'answer result ok';
+
+    my $start = time();
+    my $deadline = $start + 4;
+    my $seq = 8200;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x8282), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at),
+        sprintf("negative value still enables the feature (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    ok defined($fired_at) && $fired_at >= 1.5 && $fired_at <= 3.5,
+        sprintf("negative value falls through to 2s global (fired at %s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'undef');
+    delete_call($cid, $ft);
+    close $sock_a; close $sock_b;
+};
+
+# E4: unidirectional-timeout= (empty value).
+# str_to_i("") returns the fallback (-1); >0 guard rejects; warning logged;
+# fall-through to global 2s.
+subtest 'edge: unidirectional-timeout= (empty) warns and falls through' => sub {
+    received_requests($mock);  # drain
+    $tag_ctr++;
+    my $cid = "cb-call-$tag_ctr-$$";
+    my $ft  = "cb-ft-$tag_ctr-$$";
+    my $tt  = "cb-tt-$tag_ctr-$$";
+    my $a_port = 7400 + ($tag_ctr * 2);
+    my $b_port = 7401 + ($tag_ctr * 2);
+
+    my $sock_a = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.1', LocalPort => $a_port,
+    ) or die "sockA bind: $!";
+    my $sock_b = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_port,
+    ) or die "sockB bind: $!";
+
+    my $offer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    my $answer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+
+    my $oresp = rtpe_raw_req({
+        command           => 'offer',
+        'call-id'         => $cid,
+        'from-tag'        => $ft,
+        sdp               => $offer_sdp,
+        'xmlrpc-callback' => $MOCK_URL,
+        flags             => ['trust-address', 'unidirectional-timeout='],
+    });
+    is $oresp->{result}, 'ok', 'offer result ok with empty value';
+    my ($port_a) = ($oresp->{sdp} // '') =~ /m=audio (\d+)/;
+    ok $port_a, 'A-side port allocated';
+
+    my $aresp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $aresp->{result}, 'ok', 'answer result ok';
+
+    my $start = time();
+    my $deadline = $start + 4;
+    my $seq = 8300;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x8383), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at),
+        sprintf("empty value still enables the feature (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    ok defined($fired_at) && $fired_at >= 1.5 && $fired_at <= 3.5,
+        sprintf("empty value falls through to 2s global (fired at %s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'undef');
+    delete_call($cid, $ft);
+    close $sock_a; close $sock_b;
+};
+
+# E5: the ng dictionary accepts "unidirectional timeout=N" (space form) as
+# an alias for "unidirectional-timeout=N" (hyphen form). call_flags.c
+# registers both prefixes in its dispatch table. Bencode preserves literal
+# spaces inside string values, so passing the flag as a single array element
+# delivers it to the daemon intact. With global=2s and override=5s, a
+# 3-second observation window must NOT fire a callback (still inside the
+# 5s override), which discriminates the alias from the default "unknown
+# flag" branch (which would leave the feature disarmed and also produce
+# no callback -- see below for the flip-side assertion via a sibling run).
+subtest 'edge: space-form "unidirectional timeout=5" is equivalent to hyphen form' => sub {
+    received_requests($mock);  # drain
+    $tag_ctr++;
+    my $cid = "cb-call-$tag_ctr-$$";
+    my $ft  = "cb-ft-$tag_ctr-$$";
+    my $tt  = "cb-tt-$tag_ctr-$$";
+    my $a_port = 7400 + ($tag_ctr * 2);
+    my $b_port = 7401 + ($tag_ctr * 2);
+
+    my $sock_a = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.1', LocalPort => $a_port,
+    ) or die "sockA bind: $!";
+    my $sock_b = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_port,
+    ) or die "sockB bind: $!";
+
+    my $offer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    my $answer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+
+    my $oresp = rtpe_raw_req({
+        command           => 'offer',
+        'call-id'         => $cid,
+        'from-tag'        => $ft,
+        sdp               => $offer_sdp,
+        'xmlrpc-callback' => $MOCK_URL,
+        flags             => ['trust-address', 'unidirectional timeout=5'],
+    });
+    is $oresp->{result}, 'ok', 'offer result ok with space-form flag';
+    my ($port_a) = ($oresp->{sdp} // '') =~ /m=audio (\d+)/;
+    ok $port_a, 'A-side port allocated';
+
+    my $aresp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $aresp->{result}, 'ok', 'answer result ok';
+
+    # Observe for 3s: 1s past global threshold, 2s short of the override.
+    # If the parser silently ignored the space-form override, the global
+    # 2s threshold would fire within this window.
+    my $start = time();
+    my $deadline = $start + 3;
+    my $seq = 8400;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x8484), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok !defined($fired_at),
+        sprintf("space-form override=5 suppresses global 2s firing (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    delete_call($cid, $ft);
+    close $sock_a; close $sock_b;
+};
+
+# E6: distinguishing UNIDIRECTIONAL_TIMEOUT from the bidirectional TIMEOUT
+# in the callback payload.
+#
+# Finding: xmlrpc-format=2 (Kamailio dlg.terminate_dlg) carries only
+# <call-id>, <from-tag>, <to-tag> -- see daemon/call.c:466-476. The
+# termination reason (UNIDIRECTIONAL_TIMEOUT vs TIMEOUT vs FINAL_TIMEOUT)
+# is stored on the monologue (call.c:353) and logged via ilog but does NOT
+# appear in the XMLRPC body. So the body content alone cannot tell the
+# two apart.
+#
+# What we CAN assert: that a unidir-armed, one-way-silent call produces
+# a valid format-2 callback naming THIS call-id, fired inside the unidir
+# window (< bidirectional --timeout=6s). Firing under 4s means the
+# unidirectional path took the call down, not the bidirectional timeout.
+subtest 'edge: UNIDIRECTIONAL_TIMEOUT-triggered callback is a valid format-2 body' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b) = fresh_call(1);
+    my $start = time();
+    my $deadline = $start + 4;
+    my $seq = 8500;
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my @got;
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x8585), 0, $dest);
+        $seq++;
+        sleep 0.05;
+        @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at),
+        sprintf("callback fired via unidir path (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    ok defined($fired_at) && $fired_at < 4.0,
+        sprintf("fired at %s, inside the unidir window (<4s, well under the 6s bidirectional timeout)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'undef');
+    ok scalar(@got) >= 1, 'at least one callback body captured';
+    my $body = $got[0] // '';
+    like $body, qr/<methodName>dlg\.terminate_dlg<\/methodName>/,
+        'body is format-2 dlg.terminate_dlg methodCall';
+    like $body, qr/\Q$cid\E/, 'body contains this call-id (not a stray callback)';
+    like $body, qr/\Q$ft\E/, 'body contains from-tag';
+    like $body, qr/\Q$tt\E/, 'body contains to-tag';
+    delete_call($cid, $ft);
+};
+
 shutdown_mock($mock);
 
 done_testing();
