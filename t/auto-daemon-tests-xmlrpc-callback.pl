@@ -371,9 +371,9 @@ subtest 'hold: sendonly re-INVITE does not trigger unidir teardown' => sub {
     });
     is $hold_ans_resp->{result}, 'ok', 'hold re-answer result ok';
 
-    # Post-hold phase: A (held party's peer) continues sending MOH; B sends
-    # nothing. Watch well past the 2s unidirectional threshold for any spurious
-    # callback.
+    # Post-hold phase: A (the holder, sendonly) keeps sending packets to
+    # simulate MOH toward B; B (recvonly) sends nothing. Watch well past
+    # the 2s unidirectional threshold for any spurious callback.
     my $start    = time();
     my $deadline = $start + 4;  # 2x threshold
     while (time() < $deadline) {

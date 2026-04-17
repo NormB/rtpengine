@@ -854,6 +854,7 @@ struct media_subscription *__add_media_subscription(struct call_media * which, s
 		const struct sink_attrs *attrs);
 bool __unsubscribe_media(struct call_media * which, struct call_media * from);
 struct media_subscription *call_ml_get_top_ms(struct call_monologue *ml);
+bool ml_is_held(struct call_monologue *ml);
 bool call_ml_sendonly_inactive(struct call_monologue *ml);
 struct media_subscription *call_media_get_top_ms(struct call_media *cm);
 struct media_subscription *call_get_media_subscription(subscription_ht ht, struct call_media *cm);

@@ -148,16 +148,21 @@ static void call_timer_iterator(call_t *c, struct iterator_helper *hlp) {
 	rwlock_lock_r(&c->master_lock);
 	log_info_call(c);
 
-	/* If any monologue in this call is on hold (offered sendonly or
+	/* Requires c->master_lock (acquired above) - keep this after rwlock_lock_r.
+	 *
+	 * If any monologue in this call is on hold (offered sendonly or
 	 * inactive), disable unidirectional teardown for this tick. Hold is
 	 * indistinguishable from "dead one-way" at the packet layer, and the
 	 * false positive is strictly worse than the no-protection case: a
 	 * held caller (on MOH, muted, running noise cancellation) would
-	 * otherwise get torn down every time. See call_ml_sendonly_inactive
-	 * at daemon/call.c for the hold-state semantic. */
+	 * otherwise get torn down every time. See the hold-state helper
+	 * (below) for sendonly/inactive definition.
+	 *
+	 * This is a safety-net. A deeper fix would make the per-stream check
+	 * aware of peer hold state; deferred until field validation. */
 	if (unidir_enabled) {
 		for (__auto_type it = c->monologues.head; it; it = it->next) {
-			if (call_ml_sendonly_inactive(it->data)) {
+			if (ml_is_held(it->data)) {
 				unidir_enabled = false;
 				break;
 			}
@@ -4366,8 +4371,33 @@ struct media_subscription *call_ml_get_top_ms(struct call_monologue *ml) {
 }
 
 /**
- * Checks if any present audio medias are sendonly/inactive.
+ * Silent hold-state check: true if any present audio media has SEND cleared
+ * (sendonly or inactive from the offerer's perspective).
+ *
+ * sendonly media for rtpengine means: receive from this media, but don't send to it
+ *   sendonly: !MEDIA_ISSET(media, SEND) && MEDIA_ISSET(media, RECV)
+ *   inactive: !MEDIA_ISSET(media, SEND) && !MEDIA_ISSET(media, RECV)
+ *
  * Should only be used when medias are already initialized with flags.
+ * Safe to call from hot paths (no logging).
+ */
+bool ml_is_held(struct call_monologue *ml) {
+	for (int i = 0; i < ml->medias->len; i++)
+	{
+		struct call_media * media = ml->medias->pdata[i];
+		if (!media || media->type_id != MT_AUDIO)
+			continue;
+		if (!MEDIA_ISSET(media, SEND))
+			return true;
+	}
+	return false;
+}
+
+/**
+ * SDP-offer-path wrapper around ml_is_held(): logs the hold reason.
+ * Callers in the offer/answer path use this so operators can trace why
+ * MOH/hold behaviour kicked in. Hot-path callers (timers, etc.) should
+ * call ml_is_held() directly to avoid log spam.
  */
 bool call_ml_sendonly_inactive(struct call_monologue *ml) {
 	for (int i = 0; i < ml->medias->len; i++)
@@ -4375,10 +4405,6 @@ bool call_ml_sendonly_inactive(struct call_monologue *ml) {
 		struct call_media * media = ml->medias->pdata[i];
 		if (!media || media->type_id != MT_AUDIO)
 			continue;
-		/* sendonly media for rtpengine means: receive from this media, but don't send to it
-		 * sendonly: !MEDIA_ISSET(media, SEND) && MEDIA_ISSET(media, RECV)
-		 * inactive: !MEDIA_ISSET(media, SEND) && !MEDIA_ISSET(media, RECV)
-		 */
 		if (!MEDIA_ISSET(media, SEND)) {
 			if (!MEDIA_ISSET(media, RECV))
 				ilog(LOG_DEBUG, "Coming SDP offer puts on hold using inactive type.");
