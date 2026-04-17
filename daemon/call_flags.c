@@ -921,6 +921,10 @@ void call_ng_flags_flags(str *s, unsigned int idx, helper_arg arg) {
 		case CSH_LOOKUP("unidirectional"):
 			out->unidirectional = true;
 			break;
+		case CSH_LOOKUP("unidirectional-timeout"):
+		case CSH_LOOKUP("unidirectional timeout"):
+			out->unidirectional_timeout = true;
+			break;
 		case CSH_LOOKUP("webrtc"):
 		case CSH_LOOKUP("webRTC"):
 		case CSH_LOOKUP("WebRTC"):

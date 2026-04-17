@@ -197,6 +197,7 @@ RTPE_NG_FLAGS_STR_CASE_HT_PARAMS
 	             protocol_accept:1,
 	             no_redis_update:1,
 	             unidirectional:1,
+	             unidirectional_timeout:1,
 	             trust_address:1,
 	             port_latching:1,
 	             no_port_latching:1,

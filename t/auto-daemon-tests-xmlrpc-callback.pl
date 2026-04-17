@@ -19,7 +19,7 @@ my $mock = start_mock($MOCK_PORT);
 sleep 0.3;
 
 autotest_start(qw(--config-file=none -t -1
-    -i 203.0.113.1 -n 2223
+    -i 203.0.113.1 -n 2223 -b 127.0.0.1:18080
     --timeout=6
     --silent-timeout=6
     --unidirectional-timeout=2
@@ -167,6 +167,5 @@ subtest 'opt-out: one-way silence does not fire callback without flag' => sub {
 };
 
 shutdown_mock($mock);
-NGCP::Rtpengine::AutoTest::terminate('done');
 
 done_testing();

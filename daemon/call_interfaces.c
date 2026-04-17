@@ -661,6 +661,8 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char *addr)
 
 	if (flags.xmlrpc_callback.len)
 		call->xmlrpc_callback = call_str_cpy(&flags.xmlrpc_callback);
+	if (flags.unidirectional_timeout)
+		call->unidirectional_timeout_enabled = true;
 	if (flags.dtmf_log_dest.address.family)
 		call->dtmf_log_dest = flags.dtmf_log_dest;
 
