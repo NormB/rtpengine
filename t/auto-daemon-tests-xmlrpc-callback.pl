@@ -174,13 +174,18 @@ subtest 'opt-out: one-way silence does not fire callback without flag' => sub {
     delete_call($cid, $ft);
 };
 
-# --- Subtest 5: RTCP liveness — DTX/muted side with RTCP RR keeps call alive ---
-# B is muted: sends no RTP. But B keeps emitting RTCP RR every second (well
-# faster than the 2s --unidirectional-timeout threshold). A sends RTP
-# continuously. Since B's RTP stream's rtcp_sibling is fresh, rtpengine must
-# NOT consider the call unidirectionally idle, and NO xmlrpc callback should
+# --- Subtest 5: traffic on the RTCP sibling keeps the direction alive ---
+# Traffic on the RTCP sibling (any UDP the address-check accepts) keeps the
+# direction alive. rtpengine bumps last_packet_us on any accepted UDP traffic
+# on the stream before RTCP parsing runs (see daemon/media_socket.c: the
+# timestamp update happens before do_rtcp_parse()), so the new unidirectional
+# check sees a fresh timestamp on the RTP stream's rtcp_sibling.
+#
+# In practice this is how DTX / NC endpoints stay up: they still emit RTCP RR,
+# and that bump on last_packet_us is what the new check sees. Here B sends
+# only RTCP RR (no RTP) while A sends RTP continuously; no callback should
 # fire.
-subtest 'unidirectional: fresh RTCP RR on silent side suppresses teardown' => sub {
+subtest 'unidirectional: traffic on RTCP sibling suppresses teardown' => sub {
     received_requests($mock);  # drain
     my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b, $a_port, $b_port)
         = fresh_call(1);
@@ -194,11 +199,17 @@ subtest 'unidirectional: fresh RTCP RR on silent side suppresses teardown' => su
     my $dest_rtp  = pack_sockaddr_in($port_a,     inet_aton($RTPE_IFACE));
     my $dest_rtcp = pack_sockaddr_in($port_b + 1, inet_aton($RTPE_IFACE));
 
-    my $deadline      = time() + 5;  # well past 2s threshold
-    my $next_rtcp     = time();
+    # Seed one RR immediately after answer so the RTCP sibling has a fresh
+    # last_packet_us from t=0. Without this seed, the first scheduled RR
+    # lands up to $rtcp_interval later, which could race the 2s timer tick.
+    $sock_b_rtcp->send(rtcp_rr(), 0, $dest_rtcp);
+
+    my $start         = time();
+    my $deadline      = $start + 5;  # well past 2s threshold
+    my $next_rtcp     = time() + 1.0;
     my $rtcp_interval = 1.0;         # twice per threshold
     my $seq           = 3000;
-    my $rtcp_sent     = 0;
+    my $rtcp_sent     = 1;           # seed RR above
 
     while (time() < $deadline) {
         $sock_a->send(rtp_pkt($seq, $seq * 160, 0x3333), 0, $dest_rtp);
@@ -210,11 +221,14 @@ subtest 'unidirectional: fresh RTCP RR on silent side suppresses teardown' => su
         }
         sleep 0.02;
     }
+    my $elapsed = time() - $start;
     sleep 0.5;
     my @got = received_requests($mock);
     ok $rtcp_sent >= 4, "sent $rtcp_sent RTCP RR packets from B";
+    ok $elapsed >= 4,
+        sprintf("elapsed %.2fs well past 2s threshold", $elapsed);
     is scalar(@got), 0,
-        "no callback fired: RTCP RR proves B alive despite RTP silence (got "
+        "no callback fired: RTCP sibling traffic keeps B-side alive (got "
         . scalar(@got) . ")";
     delete_call($cid, $ft);
     close $sock_b_rtcp;
