@@ -192,17 +192,32 @@ static void call_timer_iterator(call_t *c, struct iterator_helper *hlp) {
 		if (!ps->media)
 			continue;
 
-		/* Unidirectional timeout: if enabled, flag any single stream that
-		 * has been silent longer than the configured threshold. This runs
-		 * independently of the recv_good aggregation so an active stream
-		 * does not mask an idle sibling. */
+		/* Unidirectional timeout: flag any single stream that has been
+		 * silent longer than the configured threshold. Before declaring a
+		 * stream dead, check its paired RTCP stream: a DTX-compliant or
+		 * muted endpoint still emits RTCP RR and that proves liveness.
+		 * For rtcp-mux, rtcp_sibling is NULL and RTCP already updates the
+		 * main stream's last_packet_us, so no change needed there. Skip
+		 * RTCP-only streams in the outer pass - they are consulted via
+		 * the RTP sibling's rtcp_sibling pointer. */
 		if (unidir_enabled && !any_stream_idle_unidir
 				&& PS_ISSET(ps, FILLED)
 				&& MEDIA_ISSET(ps->media, RECV)
+				&& !PS_ISSET(ps, RTCP)
 				&& timestamp > 0
 				&& rtpe_now > timestamp
-				&& (rtpe_now - timestamp) > unidir_check_us)
-			any_stream_idle_unidir = true;
+				&& (rtpe_now - timestamp) > unidir_check_us) {
+			bool rtcp_fresh = false;
+			struct packet_stream *rtcp_ps = ps->rtcp_sibling;
+			if (rtcp_ps) {
+				int64_t rtcp_ts = packet_stream_last_packet(rtcp_ps);
+				if (rtcp_ts > 0 && rtpe_now > rtcp_ts
+						&& (rtpe_now - rtcp_ts) <= unidir_check_us)
+					rtcp_fresh = true;
+			}
+			if (!rtcp_fresh)
+				any_stream_idle_unidir = true;
+		}
 
 		g_autoptr(stream_fd) sfd = NULL;
 

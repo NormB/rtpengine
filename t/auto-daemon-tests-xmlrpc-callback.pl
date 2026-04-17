@@ -84,7 +84,8 @@ sub fresh_call {
     my ($rtpe_port_b) = ($aresp->{sdp} // '') =~ /m=audio (\d+)/;
     ok $rtpe_port_b, "rtpengine B-side port allocated";
 
-    return ($cid, $ft, $tt, $sock_a, $sock_b, $rtpe_port_a, $rtpe_port_b);
+    return ($cid, $ft, $tt, $sock_a, $sock_b, $rtpe_port_a, $rtpe_port_b,
+            $a_port, $b_port);
 }
 
 sub delete_call {
@@ -99,6 +100,13 @@ sub delete_call {
 sub rtp_pkt {
     my ($seq, $ts, $ssrc) = @_;
     return pack('CCnNN a*', 0x80, 0x00, $seq, $ts, $ssrc, "\x00" x 160);
+}
+
+# Minimal RTCP Receiver Report: V=2, P=0, RC=0, PT=201 (RR), length=1 (8 bytes),
+# SSRC=0xdeadbeef. No report blocks. Enough for rtpengine to accept and bump
+# the RTCP stream's last_packet_us timestamp.
+sub rtcp_rr {
+    return pack('CCnN', 0x80, 201, 1, 0xdeadbeef);
 }
 
 # --- Subtest 1: mock harness sanity ---
@@ -164,6 +172,52 @@ subtest 'opt-out: one-way silence does not fire callback without flag' => sub {
     my @got = received_requests($mock);
     is scalar @got, 0, 'no callback fired within 4s when flag absent';
     delete_call($cid, $ft);
+};
+
+# --- Subtest 5: RTCP liveness — DTX/muted side with RTCP RR keeps call alive ---
+# B is muted: sends no RTP. But B keeps emitting RTCP RR every second (well
+# faster than the 2s --unidirectional-timeout threshold). A sends RTP
+# continuously. Since B's RTP stream's rtcp_sibling is fresh, rtpengine must
+# NOT consider the call unidirectionally idle, and NO xmlrpc callback should
+# fire.
+subtest 'unidirectional: fresh RTCP RR on silent side suppresses teardown' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b, $a_port, $b_port)
+        = fresh_call(1);
+
+    # Non-muxed: RTCP lives on port+1 on both sides.
+    my $sock_b_rtcp = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_port + 1,
+    ) or die "sockB RTCP bind: $!";
+
+    my $dest_rtp  = pack_sockaddr_in($port_a,     inet_aton($RTPE_IFACE));
+    my $dest_rtcp = pack_sockaddr_in($port_b + 1, inet_aton($RTPE_IFACE));
+
+    my $deadline      = time() + 5;  # well past 2s threshold
+    my $next_rtcp     = time();
+    my $rtcp_interval = 1.0;         # twice per threshold
+    my $seq           = 3000;
+    my $rtcp_sent     = 0;
+
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0x3333), 0, $dest_rtp);
+        $seq++;
+        if (time() >= $next_rtcp) {
+            $sock_b_rtcp->send(rtcp_rr(), 0, $dest_rtcp);
+            $rtcp_sent++;
+            $next_rtcp = time() + $rtcp_interval;
+        }
+        sleep 0.02;
+    }
+    sleep 0.5;
+    my @got = received_requests($mock);
+    ok $rtcp_sent >= 4, "sent $rtcp_sent RTCP RR packets from B";
+    is scalar(@got), 0,
+        "no callback fired: RTCP RR proves B alive despite RTP silence (got "
+        . scalar(@got) . ")";
+    delete_call($cid, $ft);
+    close $sock_b_rtcp;
 };
 
 shutdown_mock($mock);
