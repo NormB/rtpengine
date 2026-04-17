@@ -243,7 +243,19 @@ INLINE void ng_unidir_timeout_val(str *s, unsigned int idx, helper_arg arg) {
 	/* already prefix-matched to "unidirectional-timeout=" / "unidirectional timeout=",
 	 * so s is just the numeric remainder */
 	out->unidirectional_timeout = true;
-	out->unidirectional_timeout_s = str_to_i(s, 0);
+	/* str_to_i returns the fallback (-1) on parse failure. A parsed
+	 * value <= 0 is also rejected: zero is ambiguous with the bare
+	 * flag, negatives make no sense as a timeout. In all failure
+	 * cases the flag stays enabled and falls through to the global
+	 * CLI value, but the operator gets a warning. */
+	int parsed = str_to_i(s, -1);
+	if (parsed > 0)
+		out->unidirectional_timeout_s = parsed;
+	else
+		ilog(LOG_WARN, "Ignoring invalid unidirectional-timeout value "
+				"'" STR_FORMAT "' (expected positive integer seconds); "
+				"using global default",
+				STR_FMT(s));
 }
 
 INLINE void ng_el_option(str *s, unsigned int idx, helper_arg arg) {
