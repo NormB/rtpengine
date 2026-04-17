@@ -312,6 +312,87 @@ subtest 'override: unidirectional-timeout=4 holds past 2s, fires by 5s' => sub {
     delete_call($cid, $ft);
 };
 
+# --- Subtest: hold re-INVITE (a=sendonly) does NOT fire teardown ---
+# Regression guard: mid-call, the offerer issues a re-INVITE with a=sendonly
+# (standard "put on hold"). The answerer mirrors with a=recvonly. After this
+# reoffer/reanswer, the answerer is no longer expected to send media, so the
+# B->A direction should go silent without tripping the unidirectional idle
+# check. Hold is indistinguishable from "dead one-way" at the packet layer,
+# so the safety-net is: if any monologue is on hold, skip the unidir check
+# for this tick. Held calls do not get unidirectional protection during hold;
+# the false-positive (tearing down a held caller on MOH) is strictly worse
+# than the no-protection case.
+subtest 'hold: sendonly re-INVITE does not trigger unidir teardown' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b, $a_port, $b_port)
+        = fresh_call(1);
+
+    my $dest_a = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $dest_b = pack_sockaddr_in($port_b, inet_aton($RTPE_IFACE));
+
+    # Warm-up: establish bidirectional RTP activity so both streams are FILLED
+    # and confirmed before the hold re-INVITE arrives.
+    my $seq_a = 6000;
+    my $seq_b = 7000;
+    for (my $i = 0; $i < 20; $i++) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0x6161), 0, $dest_a);
+        $sock_b->send(rtp_pkt($seq_b++, $seq_b * 160, 0x6262), 0, $dest_b);
+        sleep 0.02;
+    }
+
+    # A (offerer) puts the call on hold: re-INVITE with a=sendonly.
+    my $hold_offer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+
+    my $hold_resp = rtpe_raw_req({
+        command    => 'offer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        sdp        => $hold_offer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_resp->{result}, 'ok', 'hold re-offer result ok';
+
+    # B mirrors with a=recvonly.
+    my $hold_answer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+
+    my $hold_ans_resp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $hold_answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_ans_resp->{result}, 'ok', 'hold re-answer result ok';
+
+    # Post-hold phase: A (held party's peer) continues sending MOH; B sends
+    # nothing. Watch well past the 2s unidirectional threshold for any spurious
+    # callback.
+    my $start    = time();
+    my $deadline = $start + 4;  # 2x threshold
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0x6161), 0, $dest_a);
+        sleep 0.02;
+    }
+    my $elapsed = time() - $start;
+    sleep 0.3;
+
+    my @got = received_requests($mock);
+    ok $elapsed >= 3.5,
+        sprintf("observed %.2fs of post-hold silence (well past 2s threshold)",
+            $elapsed);
+    is scalar(@got), 0,
+        "no callback fired: sendonly hold correctly suppresses unidir teardown "
+        . "(got " . scalar(@got) . ")";
+    delete_call($cid, $ft);
+};
+
 shutdown_mock($mock);
 
 done_testing();

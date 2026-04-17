@@ -148,6 +148,22 @@ static void call_timer_iterator(call_t *c, struct iterator_helper *hlp) {
 	rwlock_lock_r(&c->master_lock);
 	log_info_call(c);
 
+	/* If any monologue in this call is on hold (offered sendonly or
+	 * inactive), disable unidirectional teardown for this tick. Hold is
+	 * indistinguishable from "dead one-way" at the packet layer, and the
+	 * false positive is strictly worse than the no-protection case: a
+	 * held caller (on MOH, muted, running noise cancellation) would
+	 * otherwise get torn down every time. See call_ml_sendonly_inactive
+	 * at daemon/call.c for the hold-state semantic. */
+	if (unidir_enabled) {
+		for (__auto_type it = c->monologues.head; it; it = it->next) {
+			if (call_ml_sendonly_inactive(it->data)) {
+				unidir_enabled = false;
+				break;
+			}
+		}
+	}
+
 	// final timeout applicable to all calls (own and foreign)
 	int64_t final_timeout = atomic_get_na(&rtpe_config.final_timeout_us);
 	if (final_timeout && rtpe_now >= (c->created + final_timeout)) {
