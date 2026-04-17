@@ -33,6 +33,7 @@ enum termination_reason {
 	SILENT_TIMEOUT=4,
 	FINAL_TIMEOUT=5,
 	OFFER_TIMEOUT=6,
+	UNIDIRECTIONAL_TIMEOUT=7,
 };
 
 enum tag_type {
@@ -800,6 +801,7 @@ struct call {
 	unsigned char		tos;
 	str			created_from;
 	str			xmlrpc_callback;
+	bool			unidirectional_timeout_enabled;
 	endpoint_t		dtmf_log_dest;
 
 	int			redis_hosted_db;

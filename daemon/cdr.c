@@ -16,6 +16,7 @@ static const char * const __term_reason_texts[] = {
 	[SILENT_TIMEOUT] = "SILENT_TIMEOUT",
 	[FINAL_TIMEOUT] = "FINAL_TIMEOUT",
 	[OFFER_TIMEOUT] = "OFFER_TIMEOUT",
+	[UNIDIRECTIONAL_TIMEOUT] = "UNIDIRECTIONAL_TIMEOUT",
 };
 static const char * const __tag_type_texts[] = {
 	[FROM_TAG] = "FROM_TAG",
