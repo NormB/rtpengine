@@ -793,6 +793,375 @@ subtest 'edge: UNIDIRECTIONAL_TIMEOUT-triggered callback is a valid format-2 bod
     delete_call($cid, $ft);
 };
 
+# --- Edge-case subtests (P2: behavior edges) ---
+
+# E7: a=inactive re-INVITE also suppresses teardown.
+# The hold safety-net uses ml_is_held(ml), which matches any audio media
+# with !MEDIA_ISSET(media, SEND). That covers both sendonly (SEND clear,
+# RECV set) and inactive (SEND clear, RECV clear). Subtest 12 covers
+# sendonly; E7 covers the inactive variant. With inactive both sides
+# genuinely stop sending RTP -- there is no MOH flow -- so the test just
+# waits 4s with both sockets quiet and confirms zero callbacks.
+subtest 'hold: inactive re-INVITE also suppresses unidir teardown' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b, $a_port, $b_port)
+        = fresh_call(1);
+
+    my $dest_a = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $dest_b = pack_sockaddr_in($port_b, inet_aton($RTPE_IFACE));
+
+    # Warm-up: establish bidirectional RTP so both streams are FILLED
+    # and confirmed before the hold re-INVITE arrives.
+    my $seq_a = 9100;
+    my $seq_b = 9200;
+    for (my $i = 0; $i < 20; $i++) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0x9191), 0, $dest_a);
+        $sock_b->send(rtp_pkt($seq_b++, $seq_b * 160, 0x9292), 0, $dest_b);
+        sleep 0.02;
+    }
+
+    # A re-INVITEs with a=inactive.
+    my $hold_offer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=inactive\r\n";
+    my $hold_resp = rtpe_raw_req({
+        command    => 'offer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        sdp        => $hold_offer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_resp->{result}, 'ok', 'inactive re-offer result ok';
+
+    # B mirrors with a=inactive.
+    my $hold_answer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=inactive\r\n";
+    my $hold_ans_resp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $hold_answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $hold_ans_resp->{result}, 'ok', 'inactive re-answer result ok';
+
+    # Post-hold phase: neither side sends. Watch 4s (2x threshold).
+    my $start    = time();
+    my $deadline = $start + 4;
+    while (time() < $deadline) {
+        sleep 0.1;
+    }
+    my $elapsed = time() - $start;
+    sleep 0.3;
+
+    my @got = received_requests($mock);
+    ok $elapsed >= 3.5,
+        sprintf("observed %.2fs of post-hold silence (well past 2s threshold)",
+            $elapsed);
+    is scalar(@got), 0,
+        "no callback fired: inactive hold correctly suppresses unidir teardown "
+        . "(got " . scalar(@got) . ")";
+    delete_call($cid, $ft);
+};
+
+# E8: Hold -> resume -> go silent -> callback fires.
+# Protection must RESUME after hold is released. Put the call on hold
+# (sendonly), observe no callback, re-INVITE back to sendrecv, warm up
+# bidir briefly, then stop B. Assert exactly one callback fires post-
+# resume. Guards against the bug where once-held calls stay protected
+# forever.
+subtest 'hold -> resume -> silence fires callback (protection resumes)' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b, $a_port, $b_port)
+        = fresh_call(1);
+
+    my $dest_a = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $dest_b = pack_sockaddr_in($port_b, inet_aton($RTPE_IFACE));
+
+    # Warm-up bidir.
+    my $seq_a = 9500;
+    my $seq_b = 9600;
+    for (my $i = 0; $i < 20; $i++) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0x9595), 0, $dest_a);
+        $sock_b->send(rtp_pkt($seq_b++, $seq_b * 160, 0x9696), 0, $dest_b);
+        sleep 0.02;
+    }
+
+    # Hold: A sends sendonly.
+    my $hold_offer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendonly\r\n";
+    rtpe_raw_req({
+        command    => 'offer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        sdp        => $hold_offer_sdp,
+        flags      => ['trust-address'],
+    });
+    my $hold_answer_sdp =
+        "v=0\r\no=- 1 2 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=recvonly\r\n";
+    rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $hold_answer_sdp,
+        flags      => ['trust-address'],
+    });
+
+    # Hold phase: A (sendonly) sends MOH, B silent, 3s. No callback expected.
+    my $hold_deadline = time() + 3;
+    while (time() < $hold_deadline) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0x9595), 0, $dest_a);
+        sleep 0.02;
+    }
+    my @during_hold = received_requests($mock);
+    is scalar(@during_hold), 0,
+        "no callback during hold phase (safety-net active)";
+
+    # Resume: re-INVITE back to sendrecv.
+    my $resume_offer_sdp =
+        "v=0\r\no=- 1 3 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    my $resume_resp = rtpe_raw_req({
+        command    => 'offer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        sdp        => $resume_offer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $resume_resp->{result}, 'ok', 'resume re-offer result ok';
+
+    my $resume_answer_sdp =
+        "v=0\r\no=- 1 3 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n";
+    my $resume_ans_resp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $resume_answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $resume_ans_resp->{result}, 'ok', 'resume re-answer result ok';
+
+    # Brief bidir warm-up post-resume so both directions have a fresh
+    # last_packet_us.
+    for (my $i = 0; $i < 20; $i++) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0x9595), 0, $dest_a);
+        $sock_b->send(rtp_pkt($seq_b++, $seq_b * 160, 0x9696), 0, $dest_b);
+        sleep 0.02;
+    }
+
+    # Drain any stale callbacks (there should be none, but be defensive).
+    received_requests($mock);
+
+    # Silent-B phase: A sends, B silent. Wait past threshold.
+    my $start    = time();
+    my $deadline = $start + 4;
+    my $fired_at;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0x9595), 0, $dest_a);
+        sleep 0.05;
+        my @got = received_requests($mock);
+        if (@got) {
+            $fired_at = time() - $start;
+            last;
+        }
+    }
+    ok defined($fired_at),
+        sprintf("callback fired after resume (fired_at=%s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'never');
+    ok defined($fired_at) && $fired_at < 4.0,
+        sprintf("fired within unidir window (%s < 4s)",
+            defined($fired_at) ? sprintf("%.2fs", $fired_at) : 'undef');
+    delete_call($cid, $ft);
+};
+
+# E9: Global --unidirectional-timeout=0 + per-call =3 full behaviour
+# verification requires a second daemon run with --unidirectional-timeout=0
+# (or without the flag at all). The test harness here launches a single
+# daemon via autotest_start with --unidirectional-timeout=2, and no
+# secondary-daemon helper exists in NGCP::Rtpengine::AutoTest. Relaunching
+# mid-test is not supported.
+#
+# As a weaker-but-useful check: confirm that the ng protocol accepts the
+# per-call override spelling and returns ok. The daemon is started with
+# global=2 here, so firing time cannot distinguish override-is-primary
+# from global-is-fallback. The full behaviour test (global=0, per-call=3,
+# firing ~3s) must be verified manually or in a separate harness run.
+subtest 'accept: per-call unidirectional-timeout=3 parses and call proceeds' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b) = fresh_call(1, 3);
+    ok $port_a, 'offer with unidirectional-timeout=3 accepted';
+    ok $port_b, 'answer completed, call fully set up';
+    # Full global=0 + per-call=3 firing-time verification needs a
+    # separate daemon invocation without --unidirectional-timeout=2 on
+    # the command line; not exercised by this test harness.
+    delete_call($cid, $ft);
+};
+
+# E10: RFC 3389 Comfort Noise (PT 13) on the idle direction keeps the
+# call alive. The unidirectional check bumps last_packet_us on any
+# accepted UDP on the RTP stream (see daemon/media_socket.c), which
+# includes valid CN packets when PT 13 is negotiated in the SDP.
+#
+# To make PT 13 negotiation explicit, build the offer and answer inline
+# with both PT 0 (PCMU) and PT 13 (CN/8000) declared. A sends regular
+# PCMU; B sends ONLY CN (PT 13) once per second. No callback should
+# fire because each CN packet bumps B-side last_packet_us.
+sub cn_packet {
+    my ($seq, $ssrc) = @_;
+    # V=2 P=0 X=0 CC=0 M=0 PT=13, seq, ts, ssrc + 1 body byte (noise level).
+    return pack('CCnNN C', 0x80, 13, $seq, $seq * 160, $ssrc, 0x7f);
+}
+
+subtest 'RFC 3389 CN (PT 13) keeps direction alive on negotiated stream' => sub {
+    received_requests($mock);  # drain
+    $tag_ctr++;
+    my $cid = "cb-call-$tag_ctr-$$";
+    my $ft  = "cb-ft-$tag_ctr-$$";
+    my $tt  = "cb-tt-$tag_ctr-$$";
+    my $a_port = 7400 + ($tag_ctr * 2);
+    my $b_port = 7401 + ($tag_ctr * 2);
+
+    my $sock_a = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.1', LocalPort => $a_port,
+    ) or die "sockA bind: $!";
+    my $sock_b = IO::Socket::IP->new(
+        Type => SOCK_DGRAM, Proto => 'udp',
+        LocalHost => '198.51.100.3', LocalPort => $b_port,
+    ) or die "sockB bind: $!";
+
+    my $offer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.1\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.1\r\nt=0 0\r\n"
+      . "m=audio $a_port RTP/AVP 0 13\r\n"
+      . "a=rtpmap:0 PCMU/8000\r\n"
+      . "a=rtpmap:13 CN/8000\r\n"
+      . "a=sendrecv\r\n";
+    my $answer_sdp =
+        "v=0\r\no=- 1 1 IN IP4 198.51.100.3\r\ns=-\r\n"
+      . "c=IN IP4 198.51.100.3\r\nt=0 0\r\n"
+      . "m=audio $b_port RTP/AVP 0 13\r\n"
+      . "a=rtpmap:0 PCMU/8000\r\n"
+      . "a=rtpmap:13 CN/8000\r\n"
+      . "a=sendrecv\r\n";
+
+    my $oresp = rtpe_raw_req({
+        command           => 'offer',
+        'call-id'         => $cid,
+        'from-tag'        => $ft,
+        sdp               => $offer_sdp,
+        'xmlrpc-callback' => $MOCK_URL,
+        flags             => ['trust-address', 'unidirectional-timeout'],
+    });
+    is $oresp->{result}, 'ok', 'offer with PT 0+13 result ok';
+    my ($port_a) = ($oresp->{sdp} // '') =~ /m=audio (\d+)/;
+    ok $port_a, 'A-side port allocated';
+
+    my $aresp = rtpe_raw_req({
+        command    => 'answer',
+        'call-id'  => $cid,
+        'from-tag' => $ft,
+        'to-tag'   => $tt,
+        sdp        => $answer_sdp,
+        flags      => ['trust-address'],
+    });
+    is $aresp->{result}, 'ok', 'answer result ok';
+    my ($port_b) = ($aresp->{sdp} // '') =~ /m=audio (\d+)/;
+    ok $port_b, 'B-side port allocated';
+
+    my $dest_a = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $dest_b = pack_sockaddr_in($port_b, inet_aton($RTPE_IFACE));
+
+    # Warm-up: one brief bidir burst to mark both streams FILLED.
+    my $seq_a = 10100;
+    my $seq_b = 10200;
+    for (my $i = 0; $i < 10; $i++) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0xa1a1), 0, $dest_a);
+        $sock_b->send(rtp_pkt($seq_b++, $seq_b * 160, 0xa2a2), 0, $dest_b);
+        sleep 0.02;
+    }
+
+    # Post warm-up: A sends PCMU continuously; B sends ONLY CN once per
+    # second. Total 4s, well past the 2s threshold.
+    my $start         = time();
+    my $deadline      = $start + 4;
+    my $next_cn       = time() + 0.5;
+    my $cn_interval   = 1.0;
+    my $cn_sent       = 0;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq_a++, $seq_a * 160, 0xa1a1), 0, $dest_a);
+        if (time() >= $next_cn) {
+            $sock_b->send(cn_packet($seq_b++, 0xa2a2), 0, $dest_b);
+            $cn_sent++;
+            $next_cn = time() + $cn_interval;
+        }
+        sleep 0.02;
+    }
+    my $elapsed = time() - $start;
+    sleep 0.3;
+
+    my @got = received_requests($mock);
+    ok $cn_sent >= 3, "sent $cn_sent CN (PT 13) packets from B";
+    ok $elapsed >= 3.5,
+        sprintf("elapsed %.2fs well past 2s threshold", $elapsed);
+    # Document observed behaviour. If rtpengine accepts the CN packet
+    # (PT 13 was negotiated), last_packet_us is bumped and no callback
+    # fires. If it rejects CN (e.g. payload-type filtering ignores the
+    # rtpmap for one-byte bodies), the callback fires -- which is ALSO
+    # useful data for the writeup.
+    is scalar(@got), 0,
+        "no callback fired: CN (PT 13) keeps B-side alive when PT 13 "
+        . "is negotiated in the SDP (got " . scalar(@got) . ")";
+    delete_call($cid, $ft);
+    close $sock_a; close $sock_b;
+};
+
+# E11: Callback fires at most ONCE per call.
+# Guards against the bug where the timer keeps firing every tick after
+# the threshold is first crossed. Wait well past threshold (8s with
+# global=2s, so >=4 timer ticks past the fire point) and assert exactly
+# one callback. The design relies on the daemon unsetting the call's
+# arming state after dispatch, or on the call being torn down before
+# the next tick.
+subtest 'callback fires exactly once per call, not on every tick' => sub {
+    received_requests($mock);  # drain
+    my ($cid, $ft, $tt, $sock_a, $sock_b, $port_a, $port_b) = fresh_call(1);
+    my $dest = pack_sockaddr_in($port_a, inet_aton($RTPE_IFACE));
+    my $seq = 11000;
+
+    # Send from A continuously for 8s. B is silent the whole time.
+    my $start    = time();
+    my $deadline = $start + 8;
+    while (time() < $deadline) {
+        $sock_a->send(rtp_pkt($seq, $seq * 160, 0xb1b1), 0, $dest);
+        $seq++;
+        sleep 0.05;
+    }
+    my $elapsed = time() - $start;
+    sleep 0.5;
+
+    my @got = received_requests($mock);
+    ok $elapsed >= 7.5,
+        sprintf("observed %.2fs of one-way silence (4x threshold)", $elapsed);
+    is scalar(@got), 1,
+        "exactly one callback fired over 8s window (got " . scalar(@got)
+        . ") -- guards against per-tick repeated dispatch";
+    delete_call($cid, $ft);
+};
+
 shutdown_mock($mock);
 
 done_testing();
