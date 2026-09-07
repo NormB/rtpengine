@@ -11,8 +11,7 @@
 #include <json-glib/json-glib.h>
 
 #include "main.h"
-#include "log.h"
-#include "log_funcs.h"
+#include "log_d.h"
 #include "call.h"
 #include "ssrc.h"
 #include "rtplib.h"
@@ -170,35 +169,6 @@ static void mqtt_monologue_stats(struct call_monologue *ml, JsonBuilder *json) {
 		json_builder_set_member_name(json, "label");
 		glib_json_builder_add_str(json, &ml->label);
 	}
-
-#ifdef WITH_TRANSCODING
-	struct media_player *mp = ml->player;
-	if (mp) {
-		mutex_lock(&mp->lock);
-
-		json_builder_set_member_name(json, "media_player");
-
-		json_builder_begin_object(json);
-
-		json_builder_set_member_name(json, "duration");
-		json_builder_add_int_value(json, mp->coder.duration);
-		json_builder_set_member_name(json, "repeat");
-		json_builder_add_int_value(json, mp->opts.repeat);
-		json_builder_set_member_name(json, "frame_time");
-		json_builder_add_int_value(json, mp->last_frame_ts);
-
-		if (mp->ssrc_out && mp->media) {
-			json_builder_set_member_name(json, "SSRC");
-			json_builder_begin_object(json);
-			mqtt_ssrc_stats(mp->ssrc_out, json, mp->media);
-			json_builder_end_object(json);
-		}
-
-		json_builder_end_object(json);
-
-		mutex_unlock(&mp->lock);
-	}
-#endif
 }
 
 
@@ -240,22 +210,24 @@ static void mqtt_ssrc_stats(struct ssrc_entry_call *ssrc, JsonBuilder *json, str
 	json_builder_begin_object(json);
 
 	// copy out values
-	int64_t packets, octets, packets_lost, duplicates;
+	int64_t packets, octets, packets_lost, packets_lost_rtcp, duplicates;
 	packets = atomic64_get_na(&ssrc->stats->packets);
 	octets = atomic64_get_na(&ssrc->stats->bytes);
 	packets_lost = ssrc->packets_lost;
+	packets_lost_rtcp = ssrc->packets_lost_rtcp;
 	duplicates = ssrc->duplicates;
 
 	// process per-second stats
 	int64_t cur_ts = rtpe_now;
 	int64_t last_sample;
-	int64_t sample_packets, sample_octets, sample_packets_lost, sample_duplicates;
+	int64_t sample_packets, sample_octets, sample_packets_lost, sample_packets_lost_rtcp, sample_duplicates;
 
 	// sample values
 	last_sample = atomic64_get_set(&ssrc->last_sample, cur_ts);
 	sample_packets = atomic64_get_set(&ssrc->sample_packets, packets);
 	sample_octets = atomic64_get_set(&ssrc->sample_octets, octets);
 	sample_packets_lost = atomic64_get_set(&ssrc->sample_packets_lost, packets_lost);
+	sample_packets_lost_rtcp = atomic64_get_set(&ssrc->sample_packets_lost_rtcp, packets_lost_rtcp);
 	sample_duplicates = atomic64_get_set(&ssrc->sample_duplicates, duplicates);
 
 	json_builder_set_member_name(json, "packets");
@@ -266,6 +238,9 @@ static void mqtt_ssrc_stats(struct ssrc_entry_call *ssrc, JsonBuilder *json, str
 
 	json_builder_set_member_name(json, "lost");
 	json_builder_add_int_value(json, packets_lost);
+
+	json_builder_set_member_name(json, "lost_rtcp");
+	json_builder_add_int_value(json, packets_lost_rtcp);
 
 	json_builder_set_member_name(json, "duplicates");
 	json_builder_add_int_value(json, duplicates);
@@ -279,6 +254,7 @@ static void mqtt_ssrc_stats(struct ssrc_entry_call *ssrc, JsonBuilder *json, str
 		packets -= sample_packets;
 		octets -= sample_octets;
 		packets_lost -= sample_packets_lost;
+		packets_lost_rtcp -= sample_packets_lost_rtcp;
 		duplicates -= sample_duplicates;
 
 		json_builder_set_member_name(json, "packets_per_second");
@@ -289,6 +265,9 @@ static void mqtt_ssrc_stats(struct ssrc_entry_call *ssrc, JsonBuilder *json, str
 
 		json_builder_set_member_name(json, "lost_per_second");
 		json_builder_add_double_value(json, (double) packets_lost * 1000000.0 / usecs_diff);
+
+		json_builder_set_member_name(json, "lost_rtcp_per_second");
+		json_builder_add_double_value(json, (double) packets_lost_rtcp * 1000000.0 / usecs_diff);
 
 		json_builder_set_member_name(json, "duplicates_per_second");
 		json_builder_add_double_value(json, (double) duplicates * 1000000.0 / usecs_diff);
@@ -456,6 +435,35 @@ static void mqtt_media_stats(struct call_media *media, JsonBuilder *json) {
 	json_builder_end_object(json);
 
 	mutex_unlock(&media->ssrc_hash_out.lock);
+
+#ifdef WITH_TRANSCODING
+	struct media_player *mp = media->players[MP_DEFAULT];
+	if (mp) {
+		mutex_lock(&mp->lock);
+
+		json_builder_set_member_name(json, "media_player");
+
+		json_builder_begin_object(json);
+
+		json_builder_set_member_name(json, "duration");
+		json_builder_add_int_value(json, mp->coder.duration);
+		json_builder_set_member_name(json, "repeat");
+		json_builder_add_int_value(json, mp->opts.repeat);
+		json_builder_set_member_name(json, "frame_time");
+		json_builder_add_int_value(json, mp->last_frame_ts);
+
+		if (mp->ssrc_out && mp->media) {
+			json_builder_set_member_name(json, "SSRC");
+			json_builder_begin_object(json);
+			mqtt_ssrc_stats(mp->ssrc_out, json, mp->media);
+			json_builder_end_object(json);
+		}
+
+		json_builder_end_object(json);
+
+		mutex_unlock(&mp->lock);
+	}
+#endif
 
 	mqtt_stream_stats(ps, json);
 }

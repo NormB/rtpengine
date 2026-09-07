@@ -1,4 +1,4 @@
-#include "log.h"
+#include "log_r.h"
 #include <syslog.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -9,6 +9,20 @@ __thread const char *log_info_call, *log_info_stream;
 __thread unsigned long log_info_ssrc;
 
 
+#define ll(system, descr) #system,
+const char * const log_level_names[] = {
+#include "loglevels_common.inc"
+};
+#undef ll
+#define ll(system, descr) descr,
+const char * const log_level_descriptions[] = {
+#include "loglevels_common.inc"
+};
+#undef ll
+
+const unsigned int num_log_levels = __log_level_last_common;
+
+
 void __ilog(int prio, const char *fmt, ...) {
         va_list ap;
 	char prefix[300] = "";
@@ -16,11 +30,11 @@ void __ilog(int prio, const char *fmt, ...) {
 	char *endp = prefix + sizeof(prefix);
 
 	if (log_info_call)
-		pp += snprintf(pp, endp - pp, "[C %s%s%s] ", FMT_M(log_info_call));
+		pp += rtpe_snprintf(pp, endp - pp, "[C %s%s%s] ", FMT_M(log_info_call));
 	if (log_info_stream)
-		pp += snprintf(pp, endp - pp, "[S %s%s%s] ", FMT_M(log_info_stream));
+		pp += rtpe_snprintf(pp, endp - pp, "[S %s%s%s] ", FMT_M(log_info_stream));
 	if (log_info_ssrc)
-		pp += snprintf(pp, endp - pp, "[%s0x%lx%s] ", FMT_M(log_info_ssrc));
+		pp += rtpe_snprintf(pp, endp - pp, "[%s0x%lx%s] ", FMT_M(log_info_ssrc));
 
         va_start(ap, fmt);
         __vpilog(prio, prefix, fmt, ap);

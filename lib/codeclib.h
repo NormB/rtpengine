@@ -58,6 +58,7 @@ typedef GString *format_print_f(const struct rtp_payload_type *);
 #include <stdbool.h>
 #include <libswresample/swresample.h>
 #include <libavcodec/avcodec.h>
+#include <libavfilter/avfilter.h>
 #include <libavutil/audio_fifo.h>
 #ifdef HAVE_BCG729
 #include <bcg729/encoder.h>
@@ -85,6 +86,7 @@ struct decoder_s;
 struct encoder_s;
 struct format_s;
 struct resample_s;
+struct rescale_s;
 struct seq_packet_s;
 struct rtp_payload_type;
 union codec_options_u;
@@ -97,16 +99,17 @@ typedef struct decoder_s decoder_t;
 typedef struct encoder_s encoder_t;
 typedef struct format_s format_t;
 typedef struct resample_s resample_t;
+typedef struct rescale_s rescale_t;
 typedef struct seq_packet_s seq_packet_t;
 typedef union codec_options_u codec_options_t;
 typedef struct encoder_callback_s encoder_callback_t;
 typedef struct dtx_method_s dtx_method_t;
 typedef struct codec_cc_s codec_cc_t;
 
-typedef int packetizer_f(AVPacket *, GString *, str *, encoder_t *,
-		int64_t *__restrict pts, int64_t *__restrict dur);
+typedef int packetizer_f(AVPacket *, str *, size_t, encoder_t *,
+		int64_t *__restrict pts, int64_t *__restrict dur, bool *mark);
 typedef void format_init_f(struct rtp_payload_type *);
-typedef void set_enc_options_f(encoder_t *, const str *);
+typedef bool set_enc_options_f(encoder_t *, const str *);
 typedef void set_dec_options_f(decoder_t *, const str *);
 typedef void select_encoder_format_f(encoder_t *, format_t *requested_format, const format_t *input_format,
 		const struct rtp_codec_format *fmtp);
@@ -114,14 +117,23 @@ typedef void select_decoder_format_f(decoder_t *, const struct rtp_codec_format 
 
 typedef bool format_parse_f(struct rtp_codec_format *, const str *fmtp);
 typedef void format_answer_f(struct rtp_payload_type *, const struct rtp_payload_type *);
+typedef bool format_supported_f(const struct rtp_payload_type *);
 
+typedef const struct {
+	void (*init)(encoder_t *);
+	packetizer_f *fn;
+	void (*destroy)(encoder_t *);
+} packetizer_t;
+
+
+TYPED_GQUEUE(frame, AVFrame);
 
 
 struct codec_type_s {
 	void (*def_init)(struct codec_def_s *);
 
 	const char *(*decoder_init)(decoder_t *, const str *);
-	int (*decoder_input)(decoder_t *, const str *data, GQueue *);
+	int (*decoder_input)(decoder_t *, const str *data, frame_q *, bool);
 	void (*decoder_close)(decoder_t *);
 
 	const char *(*encoder_init)(encoder_t *, const str *);
@@ -191,6 +203,9 @@ struct codec_def_s {
 	const char *avcodec_name_dec;
 	int default_clockrate;
 	int default_channels;
+	int default_width;
+	int default_height;
+	int default_fps;
 	int default_bitrate;
 	int default_ptime;
 	int minimum_ptime;
@@ -199,7 +214,8 @@ struct codec_def_s {
 	format_cmp_f *format_cmp;
 	format_print_f *format_print;
 	format_answer_f *format_answer;
-	packetizer_f *packetizer;
+	format_supported_f *format_supported;
+	packetizer_t *packetizer;
 	select_encoder_format_f *select_encoder_format;
 	select_decoder_format_f *select_decoder_format;
 	int bits_per_sample;
@@ -239,18 +255,36 @@ struct codec_def_s {
 	const AVCodec *decoder;
 };
 
-codec_def_t *codec_def_make_generic_av(enum AVCodecID);
+codec_def_t *codec_def_make_generic_av(enum AVCodecID, enum media_type);
 
 
 struct format_s {
 	int clockrate;
 	int channels;
 	int format; // enum AVSampleFormat
+
+	int height;
+	int width;
+	int pix_fmt; // enum AVPixelFormat
+
+	int time_base; // sample rate, or fps
 };
 
 struct resample_s {
 	SwrContext *swresample;
 	bool no_filter;
+};
+
+struct rescale_s {
+	AVFilterGraph *filter;
+	AVFilterContext *src,
+			*scale,
+			*pad,
+			*format,
+			*sink;
+	format_t from_format;
+	format_t to_format;
+	format_t aspect_format;
 };
 
 enum codec_event {
@@ -264,7 +298,7 @@ struct dtx_method_s {
 
 	int (*init)(decoder_t *);
 	void (*cleanup)(decoder_t *);
-	int (*do_dtx)(decoder_t *, GQueue *, int);
+	int (*do_dtx)(decoder_t *, frame_q *, int);
 
 	union {
 		struct {
@@ -286,12 +320,15 @@ struct decoder_s {
 		 dest_format;
 
 	resample_t resampler;
+	rescale_t rescaler;
+	GString *packet_buffer;
 
 	union {
 		struct {
 			AVCodecContext *avcctx;
 			AVPacket *avpkt;
 			const enum AVSampleFormat *sample_fmts;
+			const enum AVPixelFormat *pixel_fmts;
 
 			union {
 				struct {
@@ -314,6 +351,7 @@ struct decoder_s {
 	};
 
 	unsigned long rtp_ts;
+	unsigned long dec_ts;
 	uint64_t pts;
 	int ptime;
 
@@ -335,10 +373,16 @@ struct encoder_s {
 	resample_t resampler;
 
 	union {
+		GString *sample_buffer;
+		str_q nals;
+	};
+
+	union {
 		struct {
 			const AVCodec *codec;
 			AVCodecContext *avcctx;
 			const enum AVSampleFormat *sample_fmts;
+			const enum AVPixelFormat *pixel_fmts;
 
 			union {
 				struct {
@@ -347,6 +391,8 @@ struct encoder_s {
 					unsigned int cmr_out_seq;
 					uint64_t pkt_seq;
 				} amr;
+
+				size_t nal_frag;
 			};
 		} avc;
 #ifdef HAVE_BCG729
@@ -361,9 +407,11 @@ struct encoder_s {
 	};
 	AVPacket *avpkt;
 	AVAudioFifo *fifo;
+	int (*input_fn)(encoder_t *, AVFrame *, int (*)(encoder_t *, void *u1, void *u2), void *u1, void *u2);
 	int64_t fifo_pts; // pts of first data in fifo
 	int64_t packet_pts; // first pts of data in packetizer buffer
 	int64_t next_pts; // next pts expected from the encoder
+	unsigned int frame_idx;
 	int ptime;
 	int bitrate;
 	int samples_per_frame; // for encoding
@@ -376,9 +424,13 @@ struct seq_packet_s {
 	int seq;
 };
 struct packet_sequencer_s {
-	GTree *packets;
+	seq_packet_t *packets[128]; // should be 2^n
+	unsigned int a_idx; // start of queue, 0..127
+	unsigned int a_seq; // seq of head of queue
+	unsigned int n_pks; // number of packets
+	unsigned int a_nxt; // index of next closest
+	void (*free_func)(seq_packet_t *);
 	unsigned int lost_count;
-	int seq; // next expected
 	unsigned int ext_seq; // last received
 	int roc; // rollover counter XXX duplicate with SRTP encryption context
 };
@@ -391,6 +443,8 @@ extern const GQueue * const codec_supplemental_codecs;
 extern void (*codeclib_thread_init)(void);
 extern void (*codeclib_thread_cleanup)(void);
 extern void (*codeclib_thread_loop)(void);
+
+void *dlsym_assert(void *handle, const char *sym, const char *fn);
 
 void codeclib_init(int);
 void codeclib_free(void);
@@ -405,13 +459,15 @@ bool codec_parse_fmtp(codec_def_t *def, struct rtp_codec_format *fmtp, const str
 
 decoder_t *decoder_new_fmt(codec_def_t *def, int clockrate, int channels, int ptime,
 		const format_t *resample_fmt);
-decoder_t *decoder_new_fmtp(codec_def_t *def, int clockrate, int channels, int ptime,
+decoder_t *decoder_new_fmtp(codec_def_t *def, const format_t *src_fmt, int ptime,
 		const format_t *resample_fmt,
 		struct rtp_codec_format *fmtp, const str *fmtp_string, const str *codec_opts);
 void decoder_close(decoder_t *dec);
 int decoder_input_data(decoder_t *dec, const str *data, unsigned long ts,
+		bool mark,
 		int (*callback)(decoder_t *, AVFrame *, void *u1, void *u2), void *u1, void *u2);
 int decoder_input_data_ptime(decoder_t *dec, const str *data, unsigned long ts, int *ptime,
+		bool mark,
 		int (*callback)(decoder_t *, AVFrame *, void *u1, void *u2), void *u1, void *u2);
 gboolean decoder_has_dtx(decoder_t *);
 int decoder_switch_dtx(decoder_t *dec, enum dtx_method);
@@ -429,21 +485,20 @@ int encoder_config_fmtp(encoder_t *enc, codec_def_t *def, int bitrate, int ptime
 		struct rtp_codec_format *fmtp, const str *fmtp_string, const str *codec_opts);
 void encoder_close(encoder_t *);
 void encoder_free(encoder_t *);
-int encoder_input_data(encoder_t *enc, AVFrame *frame,
-		int (*callback)(encoder_t *, void *u1, void *u2), void *u1, void *u2);
-int encoder_input_fifo(encoder_t *enc, AVFrame *frame,
-		int (*callback)(encoder_t *, void *u1, void *u2), void *u1, void *u2);
+
+INLINE int encoder_input_data(encoder_t *enc, AVFrame *frame,
+		int (*callback)(encoder_t *, void *u1, void *u2), void *u1, void *u2)
+{
+	return enc->input_fn(enc, frame, callback, u1, u2);
+}
 
 
-void __packet_sequencer_init(packet_sequencer_t *ps, GDestroyNotify);
-INLINE void packet_sequencer_init(packet_sequencer_t *ps, GDestroyNotify);
+void packet_sequencer_init(packet_sequencer_t *ps, void (*)(seq_packet_t *));
 void packet_sequencer_destroy(packet_sequencer_t *ps);
 void *packet_sequencer_next_packet(packet_sequencer_t *ps);
-int packet_sequencer_next_ok(packet_sequencer_t *ps);
+bool packet_sequencer_next_ok(packet_sequencer_t *ps);
 void *packet_sequencer_force_next_packet(packet_sequencer_t *ps);
 int packet_sequencer_insert(packet_sequencer_t *ps, seq_packet_t *);
-
-packetizer_f packetizer_passthrough; // pass frames as they arrive in AVPackets
 
 
 void frame_fill_tone_samples(enum AVSampleFormat fmt, void *samples, unsigned int offset, unsigned int num,
@@ -454,6 +509,43 @@ void frame_fill_dtmf_samples(enum AVSampleFormat fmt, void *samples, unsigned in
 
 #ifdef HAVE_CODEC_CHAIN
 
+typedef struct {
+	unsigned int ctx_idx;
+
+	unsigned int runs;
+	unsigned int slots;
+	uint64_t run_wait;
+	uint64_t writers_wait;
+	uint64_t compute_wait;
+	uint64_t readers_wait;
+
+	unsigned int run_busy;
+	unsigned int write_busy;
+	unsigned int slots_full;
+	unsigned int buf_full;
+
+	uint64_t ready_wait;
+	uint64_t callbacks_preempt;
+	uint64_t callbacks_fetch;
+	uint64_t callbacks_run;
+	uint64_t loop_barrier;
+} codec_cc_context_stats;
+
+TYPED_GQUEUE(codec_cc_context, codec_cc_context_stats);
+
+typedef struct {
+	char name[32];
+
+	unsigned int async_busy;
+	unsigned int async_blocked;
+	unsigned int async_retry;
+
+	codec_cc_context_q contexts;
+} codec_cc_stats_entry;
+
+TYPED_GQUEUE(codec_cc_stats, codec_cc_stats_entry);
+
+
 extern codec_cc_t *(*codec_cc_new)(codec_def_t *src, format_t *src_format, codec_def_t *dst,
 		format_t *dst_format, int bitrate, int ptime,
 		void *(*init_async)(void *, void *, void *),
@@ -462,6 +554,8 @@ void cc_init_chain(codec_def_t *src, format_t *src_format, codec_def_t *dst,
 		format_t *dst_format);
 void codec_cc_stop(codec_cc_t *);
 void codec_cc_free(codec_cc_t **);
+
+codec_cc_stats_q codec_cc_stats(void);
 
 #else
 
@@ -483,11 +577,6 @@ AVPacket *codec_cc_input_data(codec_cc_t *c, const str *data, unsigned long ts, 
 
 
 // `ps` must be zero allocated
-INLINE void packet_sequencer_init(packet_sequencer_t *ps, GDestroyNotify n) {
-	if (ps->packets)
-		return;
-	__packet_sequencer_init(ps, n);
-}
 INLINE int format_eq(const format_t *a, const format_t *b) {
 	if (G_UNLIKELY(a->clockrate != b->clockrate))
 		return 0;
@@ -514,10 +603,16 @@ INLINE int decoder_event(decoder_t *dec, enum codec_event event, void *ptr) {
 		return 0;
 	return dec->event_func(event, ptr, dec->event_data);
 }
-INLINE bool codec_def_supported(codec_def_t *def) {
-	if (!def)
+INLINE bool codec_supported(const struct rtp_payload_type *pt) {
+	if (!pt)
 		return false;
-	return def->support_encoding && def->support_decoding;
+	if (!pt->codec_def)
+		return false;
+	if (!pt->codec_def->support_encoding || !pt->codec_def->support_decoding)
+		return false;
+	if (pt->codec_def->format_supported)
+		return pt->codec_def->format_supported(pt);
+	return true;
 }
 
 
@@ -550,7 +645,7 @@ INLINE codec_def_t *codec_find(const str *name, enum media_type type) {
 INLINE void packet_sequencer_destroy(packet_sequencer_t *p) {
 	return;
 }
-INLINE bool codec_def_supported(codec_def_t *def) {
+INLINE bool codec_supported(const struct rtp_payload_type *pt) {
 	return false;
 }
 

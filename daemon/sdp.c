@@ -9,9 +9,8 @@
 
 #include "compat.h"
 #include "call.h"
-#include "log.h"
+#include "log_d.h"
 #include "str.h"
-#include "call.h"
 #include "crypto.h"
 #include "dtls.h"
 #include "rtp.h"
@@ -308,7 +307,7 @@ struct sdp_attr {
 };
 
 /**
- * Globaly visible variables for this file.
+ * Globally visible variables for this file.
  */
 static char __id_buf[6*2 + 1]; // 6 hex encoded characters
 const str rtpe_instance_id = STR_CONST(__id_buf);
@@ -375,7 +374,9 @@ static void sdp_manipulations_add(GString *s, const struct sdp_manipulations * s
 	for (auto_iter(l, q_ptr->head); l; l = l->next)
 	{
 		str * attr_value = l->data;
-		g_string_append_len(s, "a=", 2);
+		/* add a= only when not given by manipulation flags */
+		if (attr_value->len >= 2 && strncmp(attr_value->s, "a=", 2))
+			g_string_append_len(s, "a=", 2);
 		g_string_append_len(s, attr_value->s, attr_value->len);
 		g_string_append_len(s, "\r\n", 2);
 	}
@@ -1600,6 +1601,8 @@ static bool __rtp_payload_types(struct stream_params *sp, struct sdp_media *medi
 
 	if (!proto_is_rtp(sp->protocol))
 		return true;
+	if (sp->rtp_endpoint.port == 0)
+		return true;
 
 	/* first go through a=rtpmap and build a hash table of attrs */
 	g_autoptr(GHashTable) ht_rtpmap = g_hash_table_new(g_direct_hash, g_direct_equal);
@@ -1715,6 +1718,8 @@ no_cand:
 	if ((attr = attr_get_by_id_m_s(media, ATTR_ICE_OPTIONS))) {
 		if (str_str(&attr->strs.value, "trickle") >= 0)
 			SP_SET(sp, TRICKLE_ICE);
+		if (str_str(&attr->strs.value, "ice2") >= 0)
+			SP_SET(sp, ICE2);
 	}
 	else if (is_trickle_ice_address(&sp->rtp_endpoint))
 		SP_SET(sp, TRICKLE_ICE);
@@ -1891,6 +1896,8 @@ static struct sdp_attr *sdp_attr_dup(const struct sdp_attribute *c) {
 
 	ac->strs.name = call_str_cpy(&c->strs.name);
 	ac->strs.value = call_str_cpy(&c->strs.value);
+	ac->strs.line_value = call_str_cpy(&c->strs.line_value);
+	ac->strs.key = call_str_cpy(&c->strs.key);
 	ac->other = c->other;
 	ac->attr = c->attr;
 
@@ -2053,7 +2060,7 @@ bool sdp_streams(const sdp_sessions_q *sessions, sdp_streams_q *streams, sdp_ng_
 			bf_set_clear(&sp->sp_flags, SP_FLAG_MEDIA_HANDOVER, flags->media_handover);
 
 			/* b= (bandwidth), is parsed in sdp_parse() */
-			sp->media_session_bandiwdth = media->bandwidth;
+			sp->media_session_bandwidth = media->bandwidth;
 
 			sp->sdp_information = media->information;
 
@@ -2203,16 +2210,13 @@ bool sdp_streams(const sdp_sessions_q *sessions, sdp_streams_q *streams, sdp_ng_
 				SP_SET(sp, IMPLICIT_RTCP);
 				goto next;
 			}
-			if (attr->rtcp.port_num == sp->rtp_endpoint.port
-					&& !is_trickle_ice_address(&sp->rtp_endpoint))
-			{
-				SP_SET(sp, RTCP_MUX);
-				goto next;
-			}
 			errstr = "Invalid RTCP attribute";
 			if (fill_endpoint(&sp->rtcp_endpoint, media, flags, &attr->rtcp.address,
 						attr->rtcp.port_num))
 				goto error;
+			if (endpoint_eq(&sp->rtcp_endpoint, &sp->rtp_endpoint)
+					&& !is_trickle_ice_address(&sp->rtp_endpoint))
+				SP_SET(sp, RTCP_MUX);
 
 next:
 			t_queue_push_tail(streams, sp);
@@ -2223,7 +2227,7 @@ next:
 
 error:
 	ilog(LOG_WARNING, "Failed to extract streams from SDP: %s", errstr);
-	g_free(sp);
+	sp_free(sp);
 	return false;
 }
 
@@ -2246,7 +2250,10 @@ static void print_codec_list(GString *s, struct call_media *media) {
 
 	if (media->codecs.codec_prefs.length == 0) {
 		// legacy protocol, usage error, or allow-no-codec-media set. Print something and bail
-		g_string_append(s, "0");
+		if (media->format_str.len)
+			print_format_str(s, media);
+		else
+			g_string_append(s, "0");
 		return;
 	}
 
@@ -2419,7 +2426,7 @@ static void insert_candidate(GString *s, stream_fd *sfd,
 	if (__attr_append_str(&state, &ifa->ice_foundation))
 		return;
 
-	if (local_pref == -1)
+	if (local_pref == UINT_MAX)
 		local_pref = ifa->unique_id;
 
 	priority = ice_priority_pref(type_pref, local_pref, ps->component);
@@ -2452,7 +2459,7 @@ static void insert_sfd_candidates(GString *s, struct packet_stream *ps,
 		stream_fd *sfd = l->data;
 		insert_candidate(s, sfd, type_pref, local_pref, type, flags, ps->media);
 
-		if (local_pref != -1)
+		if (local_pref != UINT_MAX)
 			local_pref++;
 	}
 }
@@ -2495,7 +2502,7 @@ static void insert_candidates(GString *s, struct packet_stream *rtp, struct pack
 		new_priority(source_media, cand_type, &type_pref, &local_pref);
 	else {
 		type_pref = ice_type_preference(cand_type);
-		local_pref = -1;
+		local_pref = UINT_MAX;
 	}
 
 	ag = media->ice_agent;
@@ -2837,6 +2844,7 @@ static struct packet_stream *print_rtcp(GString *s, struct call_media *media, pa
 		if (MEDIA_ISSET(media, RTCP_MUX) &&
 					(flags->opmode == OP_ANSWER ||
 						flags->opmode == OP_PUBLISH ||
+						flags->opmode == OP_CREATE ||
 						((flags->opmode == OP_OFFER || flags->opmode == OP_SUBSCRIBE_REQ) && flags->rtcp_mux_require) ||
 						IS_OP_OTHER(flags->opmode)))
 		{
@@ -2964,8 +2972,16 @@ static void print_sdp_media_section(GString *s, struct call_media *media,
 				media->type_id);
 	}
 
-	if (MEDIA_ISSET(media, TRICKLE_ICE) && ice_agent) {
-		append_attr_to_gstring(s, "ice-options", &STR_CONST("trickle"), flags,
+	if (MEDIA_ISSET2(media, TRICKLE_ICE, ICE2) && ice_agent) {
+		str opts;
+		if (!MEDIA_ISSET(media, ICE2))
+			opts = STR_CONST("trickle");
+		else if (!MEDIA_ISSET(media, TRICKLE_ICE))
+			opts = STR_CONST("ice2");
+		else
+			opts = STR_CONST("trickle ice2");
+
+		append_attr_to_gstring(s, "ice-options", &opts, flags,
 				media->type_id);
 	}
 	if (MEDIA_ISSET(media, ICE)) {
@@ -3172,11 +3188,11 @@ static void sdp_out_add_other(GString *out, struct call_monologue *monologue,
 	bool media_has_ice = MEDIA_ISSET(media, ICE);
 	bool media_has_ice_lite_self = MEDIA_ISSET(media, ICE_LITE_SELF);
 
-	/* add loop protectio if required */
+	/* add loop protection if required */
 	if (flags->loop_protect)
 		append_attr_to_gstring(out, "rtpengine", &rtpe_instance_id, flags, media->type_id);
 #ifdef WITH_TRANSCODING
-	if (monologue->player && monologue->player->opts.moh && rtpe_config.moh_attr_name) {
+	if (media->players[MP_DEFAULT] && media->players[MP_DEFAULT]->opts.moh && rtpe_config.moh_attr_name) {
 		append_null_attr_to_gstring(out, rtpe_config.moh_attr_name, flags, media->type_id);
 	}
 #endif
@@ -3197,7 +3213,7 @@ static void sdp_out_add_other(GString *out, struct call_monologue *monologue,
 	/* carry other session level a= attributes to the outgoing SDP */
 	monologue->sdp_attr_print(out, monologue, flags);
 
-	/* ADD arbitrary SDP manipulations for a session sessions */
+	/* ADD arbitrary SDP manipulations for a session */
 	struct sdp_manipulations *sdp_manipulations = sdp_manipulations_get_by_id(flags->sdp_manipulations, MT_UNKNOWN);
 	sdp_manipulations_add(out, sdp_manipulations);
 }
@@ -3255,6 +3271,7 @@ static void sdp_out_add_media_connection(GString *out, struct call_media *media,
 				ifa = rtp_ps->selected_sfd->local_intf;
 			else
 				ifa = get_any_interface_address(rtp_ps->media->logical_intf, rtp_ps->media->desired_family);
+			assert(ifa != NULL);
 			ifa_addr = &ifa->spec->local_address;
 			media_conn_address_type = ifa_addr->addr.family->rfc_name;
 			media_conn_address = ifa_addr->addr.family->unspec_string;
@@ -3282,7 +3299,7 @@ __attribute__((nonnull(1, 2, 3)))
 static void sdp_out_add_osrtp_media(GString *out, struct call_media *media,
 	const struct transport_protocol *prtp, const endpoint_t *address)
 {
-	g_string_append_printf(out, "m=" STR_FORMAT " %d %s ",
+	g_string_append_printf(out, "m=" STR_FORMAT " %u %s ",
 			STR_FMT(&media->type),
 			address ? address->port : 0,
 			prtp->name);
@@ -3300,12 +3317,12 @@ static bool sdp_out_add_media(GString *out, struct call_media *media,
 		unsigned int port)
 {
 	if (media->protocol)
-		g_string_append_printf(out, "m=" STR_FORMAT " %i %s ",
+		g_string_append_printf(out, "m=" STR_FORMAT " %u %s ",
 				STR_FMT(&media->type),
 				port,
 				media->protocol->name);
 	else if (media->protocol_str.s)
-		g_string_append_printf(out, "m=" STR_FORMAT " %i " STR_FORMAT " ",
+		g_string_append_printf(out, "m=" STR_FORMAT " %u " STR_FORMAT " ",
 				STR_FMT(&media->type),
 				port,
 				STR_FMT(&media->protocol_str));
@@ -3426,7 +3443,7 @@ static struct call_media *sdp_out_set_source_media_address(struct call_media *me
 
 /**
  * For the offer/answer model, SDP create will be triggered for the B monologue,
- * which likely has empty paramaters (such as sdp origin, session name etc.), hence
+ * which likely has empty parameters (such as sdp origin, session name etc.), hence
  * such parameters have to be taken from the A monologue (so from the subscription).
  *
  * For the rest of cases (publish, subscribe, janus etc.) this works as usual:

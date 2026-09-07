@@ -9,11 +9,11 @@
 #include <libavutil/opt.h>
 #include <sys/time.h>
 #include "types.h"
-#include "log.h"
+#include "log_r.h"
 #include "output.h"
 #include "resample.h"
 #include "main.h"
-#include "fix_frame_channel_layout.h"
+#include "fix_frame_channel_layout.compat"
 
 
 

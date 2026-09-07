@@ -8,6 +8,7 @@
 #include "main.h"
 #include "control_ng.h"
 #include "bufferpool.h"
+#include "kernel.h"
 
 int64_t rtpe_started;
 
@@ -312,6 +313,36 @@ static void add_header(stats_metric_q *ret, const char *fmt1, const char *fmt2, 
 #define HEADER(fmt1, fmt2, ...) add_header(ret, fmt1, fmt2, ##__VA_ARGS__)
 #define HEADERl(fmt2, ...) add_header(ret, NULL, fmt2, ##__VA_ARGS__)
 
+
+static void bpool_stats(stats_metric_q *ret, const char *name, struct bufferpool *bpool) {
+	if (!bpool) // relevant for unit tests only
+		return;
+
+	HEADER(name, NULL);
+	HEADER("{", NULL);
+	{
+		g_auto(bpool_stats_t) stats;
+		bufferpool_stats(bpool, &stats);
+
+		METRICs("num_shards", "%u", stats.num_shards);
+
+		HEADER("shards", NULL);
+		HEADER("[", NULL);
+
+		for (unsigned int i = 0; i < stats.num_shards; i++) {
+			HEADER("{", NULL);
+
+			METRICs("references", "%u", stats.shards[i].refs);
+			METRICs("size", "%zu", stats.shards[i].size);
+			METRICs("used", "%zu", stats.shards[i].used);
+
+			HEADER("}", NULL);
+		}
+
+		HEADER("]", NULL);
+	}
+	HEADER("}", NULL);
+}
 
 stats_metric_q *statistics_gather_metrics(struct interface_sampled_rate_stats *interface_rate_stats) {
 	stats_metric_q *ret = stats_metric_q_new();
@@ -920,13 +951,137 @@ stats_metric_q *statistics_gather_metrics(struct interface_sampled_rate_stats *i
 		METRICs("pid", "%u", (unsigned int) pt->pid);
 		METRICs("wakeups", "%" PRIu64, atomic64_get_na(&pt->wakeups));
 		PROM("poller_wakeups", "counter");
-		PROMLAB("index=\"%u\",pid=\"%u\"", i, (unsigned int) pt->pid);
+		PROMLAB("index=\"%u\",pid=\"%u\",type=\"user\"", i, (unsigned int) pt->pid);
 		METRICs("items", "%" PRIu64, atomic64_get_na(&pt->items));
 		PROM("poller_items", "counter");
-		PROMLAB("index=\"%u\",pid=\"%u\"", i, (unsigned int) pt->pid);
+		PROMLAB("index=\"%u\",pid=\"%u\",type=\"user\"", i, (unsigned int) pt->pid);
 		HEADER("}", NULL);
 	}
 	HEADER("]", NULL);
+
+	HEADER("bufferpools", NULL);
+	HEADER("{", NULL);
+
+	bpool_stats(ret, "main", rtpe_bufferpool);
+	bpool_stats(ret, "shared", shm_bufferpool);
+	bpool_stats(ret, "static", static_bufferpool);
+
+	HEADER("}", NULL);
+
+	if (kernel.is_open) {
+		HEADER("kernel_pollers", NULL);
+		HEADER("[", NULL);
+		for (unsigned int i = 0; i < kernel_pollers_num; i++) {
+			struct poller_thread *pt = &kernel_poller_threads[i];
+			HEADER("{", "");
+			METRICs("index", "%u", i);
+			METRICs("pid", "%u", (unsigned int) pt->pid);
+			METRICs("wakeups", "%" PRIu64, atomic64_get_na(&pt->wakeups));
+			PROM("poller_wakeups", "counter");
+			PROMLAB("index=\"%u\",pid=\"%u\",type=\"kernel\"", i, (unsigned int) pt->pid);
+			METRICs("items", "%" PRIu64, atomic64_get_na(&pt->items));
+			PROM("poller_items", "counter");
+			PROMLAB("index=\"%u\",pid=\"%u\",type=\"kernel\"", i, (unsigned int) pt->pid);
+			HEADER("}", "");
+		}
+		HEADER("]", NULL);
+
+		HEADER("kernel_senders", NULL);
+		HEADER("[", NULL);
+		for (unsigned int i = kernel_sender_start_idx;
+				i < kernel_sender_start_idx + kernel_senders_num; i++)
+		{
+			struct kernel_ring_buf *rb = &kernel_ring_bufs[i];
+			HEADER("{", "");
+			METRICs("index", "%u", i);
+
+#define M(x, f) \
+			METRICs(#x, f, atomic_get_na(&rb->errors)); \
+			PROM("ksender_" #x, "counter"); \
+			PROMLAB("index=\"%u\"", i)
+
+			M(errors, "%d");
+			M(read_preempt, "%d");
+			M(write_preempt, "%d");
+			M(slots_full, "%d");
+			M(buf_full, "%d");
+#undef M
+		}
+		HEADER("]", NULL);
+	}
+
+#ifdef HAVE_CODEC_CHAIN
+	{
+		codec_cc_stats_q q = codec_cc_stats();
+
+		if (q.length) {
+			HEADER("codec_chain", NULL);
+			HEADER("[", NULL);
+
+			while (q.length) {
+				__auto_type e = t_queue_pop_head(&q);
+
+				HEADER("{", "");
+					METRICs("name", "\"%s\"", e->name);
+
+#define M(x, f) \
+					METRICs(#x, f, e->x); \
+					PROM("cc_" #x, "counter"); \
+					PROMLAB("name=\"%s\"", e->name)
+
+					M(async_busy, "%u");
+					M(async_blocked, "%u");
+					M(async_retry, "%u");
+#undef M
+
+					HEADER("contexts", NULL);
+					HEADER("[", NULL);
+
+					while (e->contexts.length) {
+						__auto_type c = t_queue_pop_head(&e->contexts);
+
+						HEADER("{", "");
+
+#define M(x, f) \
+						METRICs(#x, f, c->x); \
+						PROM("cc_" #x, "counter"); \
+						PROMLAB("index=\"%u\",name=\"%s\"", c->ctx_idx, e->name)
+
+						M(runs, "%u");
+						M(slots, "%u");
+						M(run_wait, "%" PRIu64);
+						M(writers_wait, "%" PRIu64);
+						M(compute_wait, "%" PRIu64);
+						M(readers_wait, "%" PRIu64);
+
+						M(run_busy, "%u");
+						M(write_busy, "%u");
+						M(slots_full, "%u");
+						M(buf_full, "%u");
+
+						M(ready_wait, "%" PRIu64);
+						M(callbacks_preempt, "%" PRIu64);
+						M(callbacks_fetch, "%" PRIu64);
+						M(callbacks_run, "%" PRIu64);
+						M(loop_barrier, "%" PRIu64);
+#undef M
+
+						HEADER("}", "");
+
+						g_free(c);
+					}
+
+					HEADER("]", NULL);
+
+				HEADER("}", "");
+
+				g_free(e);
+			}
+
+			HEADER("]", NULL);
+		}
+	}
+#endif
 
 	HEADER("}", NULL);
 
@@ -965,7 +1120,7 @@ TYPED_GHASHTABLE_IMPL(codec_stats_ht, c_str_hash, c_str_equal, NULL, codec_stats
 
 void statistics_init(void) {
 	rtpe_started = now_us();
-	rtpe_stats = bufferpool_alloc0(shm_bufferpool, sizeof(*rtpe_stats));
+	rtpe_stats = bufferpool_alloc0(static_bufferpool, sizeof(*rtpe_stats));
 
 	mutex_init(&rtpe_codec_stats_lock);
 	rtpe_codec_stats = codec_stats_ht_new();

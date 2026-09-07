@@ -1,5 +1,5 @@
 #include "http.h"
-#include "log.h"
+#include "loglib.h"
 #include <assert.h>
 
 CURL *http_create_req(const char *uri,
@@ -58,6 +58,9 @@ CURL *http_create_req(const char *uri,
 	if (!tls_verify) {
 		err = "setting CURLOPT_SSL_VERIFYPEER";
 		if ((ret = curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L)) != CURLE_OK)
+			goto fail;
+		err = "setting CURLOPT_SSL_VERIFYHOST";
+		if ((ret = curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L)) != CURLE_OK)
 			goto fail;
 	}
 

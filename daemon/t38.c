@@ -4,13 +4,12 @@
 #include <assert.h>
 #include <spandsp/t30.h>
 #include <spandsp/logging.h>
-#include "spandsp_logging.h"
+#include "spandsp_logging.compat"
 #include "codec.h"
 #include "call.h"
-#include "log.h"
+#include "log_d.h"
 #include "str.h"
 #include "media_player.h"
-#include "log_funcs.h"
 #include "sdp.h"
 
 
@@ -409,20 +408,20 @@ int t38_gateway_pair(struct call_media *t38_media, struct call_media *pcm_media,
 
 	err = "Failed to init PCM codec";
 	ensure_codec_def(&tg->pcm_pt, pcm_media);
-	if (!codec_def_supported(tg->pcm_pt.codec_def))
+	if (!codec_supported(&tg->pcm_pt))
 		goto err;
 
 	err = "Failed to create spandsp T.38 gateway";
 	if (!(tg->gw = t38_gateway_init(NULL, t38_gateway_handler, tg)))
 		goto err;
 
-	media_player_new(&tg->pcm_player, pcm_media->monologue,
+	media_player_new(&tg->pcm_player, pcm_media,
 			call_get_first_ssrc(&pcm_media->ssrc_hash_out),
 			NULL);
 	// even though we call media_player_set_media() here, we need to call it again in
 	// t38_gateway_start because our sink might not have any streams added here yet,
 	// leaving the media_player setup incomplete
-	media_player_set_media(tg->pcm_player, pcm_media);
+	media_player_set_sink(tg->pcm_player);
 	tg->pcm_player->run_func = t38_pcm_player;
 
 	// set options
@@ -451,8 +450,8 @@ int t38_gateway_pair(struct call_media *t38_media, struct call_media *pcm_media,
 	my_span_set_log(ls, spandsp_logging_func);
 	span_log_set_level(ls, span_log_level_map(get_log_level(spandsp)));
 
-	packet_sequencer_init(&tg->sequencer, (GDestroyNotify) __udptl_packet_free);
-	tg->sequencer.seq = 0;
+	packet_sequencer_init(&tg->sequencer, (void (*)(seq_packet_t *)) __udptl_packet_free);
+	tg->sequencer.a_seq = 0;
 
 	// done - add references to media structs
 	t38_media->t38_gateway = tg;
@@ -477,7 +476,7 @@ void t38_gateway_start(struct t38_gateway *tg, str_case_value_ht codec_set) {
 		return;
 
 	// set up our player first
-	media_player_set_media(tg->pcm_player, tg->pcm_media);
+	media_player_set_sink(tg->pcm_player);
 	if (media_player_setup(tg->pcm_player, &tg->pcm_pt, NULL, codec_set))
 		return;
 

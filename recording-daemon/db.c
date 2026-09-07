@@ -6,7 +6,7 @@
 #include <sys/time.h>
 #include "types.h"
 #include "main.h"
-#include "log.h"
+#include "log_r.h"
 #include "tag.h"
 #include "recaux.h"
 #include "output.h"
@@ -17,6 +17,8 @@
 CREATE TABLE `recording_calls` (
   `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
   `call_id` varchar(250) NOT NULL,
+  `start_time` timestamp NOT NULL DEFAULT current_timestamp(),
+  `end_time` datetime DEFAULT NULL,
   `start_timestamp` decimal(13,3) DEFAULT NULL,
   `end_timestamp` decimal(13,3) DEFAULT NULL,
   `status` enum('recording','completed','confirmed') DEFAULT 'recording',
@@ -29,17 +31,28 @@ CREATE TABLE `recording_streams` (
   `local_filename` varchar(250) NOT NULL,
   `full_filename` varchar(250) NOT NULL,
   `file_format` varchar(10) NOT NULL,
-  `stream` mediumblob,
   `output_type` enum('mixed','single') NOT NULL,
   `stream_id` int(10) unsigned NOT NULL,
+  `start_time` timestamp NOT NULL DEFAULT current_timestamp(),
+  `end_time` datetime DEFAULT NULL,
   `sample_rate` int(10) unsigned NOT NULL DEFAULT '0',
   `channels` int(10) unsigned NOT NULL DEFAULT '0',
   `ssrc` int(10) unsigned NOT NULL,
   `start_timestamp` decimal(13,3) DEFAULT NULL,
   `end_timestamp` decimal(13,3) DEFAULT NULL,
   `tag_label` varchar(255) NOT NULL DEFAULT '',
+  `stream` longblob NOT NULL DEFAULT '',
+  `transcript_status` enum('none','pending','done') NOT NULL DEFAULT 'none',
+  `transcript` text NOT NULL DEFAULT '',
+  `storage_file` tinyint(1) NOT NULL DEFAULT 1,
+  `storage_db` tinyint(1) NOT NULL DEFAULT 0,
+  `storage_s3` tinyint(1) NOT NULL DEFAULT 0,
+  `storage_gcs` tinyint(1) NOT NULL DEFAULT 0,
+  `s3_uri` varchar(255) NOT NULL DEFAULT '',
+  `gcs_uri` varchar(255) NOT NULL DEFAULT '',
   PRIMARY KEY (`id`),
   KEY `call` (`call`),
+  KEY `transcript_status_call_idx` (`transcript_status`,`call`),
   CONSTRAINT `fk_call_id` FOREIGN KEY (`call`) REFERENCES `recording_calls` (`id`) ON DELETE CASCADE ON UPDATE CASCADE
 );
 CREATE TABLE `recording_metakeys` (
@@ -56,16 +69,37 @@ CREATE TABLE `recording_metakeys` (
 
 
 
-static __thread MYSQL *mysql_conn;
-static __thread MYSQL_STMT
-	*stm_insert_call,
-	*stm_close_call,
-	*stm_delete_call,
-	*stm_insert_stream,
-	*stm_close_stream,
-	*stm_delete_stream,
-	*stm_config_stream,
-	*stm_insert_metadata;
+struct db_conn {
+	MYSQL *mysql_conn;
+
+	MYSQL_STMT
+		*stm_insert_call,
+		*stm_close_call,
+		*stm_delete_call,
+		*stm_insert_stream,
+		*stm_close_stream,
+		*stm_delete_stream,
+		*stm_config_stream,
+		*stm_stream_rm_file,
+		*stm_stream_s3,
+		*stm_stream_gcs,
+		*stm_insert_metadata;
+};
+typedef struct db_conn db_conn_t;
+
+TYPED_GQUEUE(db_conn, db_conn_t)
+
+static db_conn_q db_conns;
+static pthread_mutex_t db_conns_lock = PTHREAD_MUTEX_INITIALIZER;
+
+
+static void return_conn(db_conn_t *dbc) {
+	pthread_mutex_lock(&db_conns_lock);
+	t_queue_push_head(&db_conns, dbc);
+	pthread_mutex_unlock(&db_conns_lock);
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(db_conn_t, return_conn);
 
 
 static void my_stmt_close(MYSQL_STMT **st) {
@@ -76,22 +110,35 @@ static void my_stmt_close(MYSQL_STMT **st) {
 }
 
 
-static void reset_conn(void) {
-	my_stmt_close(&stm_insert_call);
-	my_stmt_close(&stm_close_call);
-	my_stmt_close(&stm_delete_call);
-	my_stmt_close(&stm_insert_stream);
-	my_stmt_close(&stm_close_stream);
-	my_stmt_close(&stm_delete_stream);
-	my_stmt_close(&stm_config_stream);
-	my_stmt_close(&stm_insert_metadata);
-	mysql_close(mysql_conn);
-	mysql_conn = NULL;
+static void reset_conn(db_conn_t *dbc) {
+	if (dbc->mysql_conn) {
+		my_stmt_close(&dbc->stm_insert_call);
+		my_stmt_close(&dbc->stm_close_call);
+		my_stmt_close(&dbc->stm_delete_call);
+		my_stmt_close(&dbc->stm_insert_stream);
+		my_stmt_close(&dbc->stm_close_stream);
+		my_stmt_close(&dbc->stm_delete_stream);
+		my_stmt_close(&dbc->stm_config_stream);
+		my_stmt_close(&dbc->stm_insert_metadata);
+		my_stmt_close(&dbc->stm_stream_s3);
+		my_stmt_close(&dbc->stm_stream_gcs);
+		my_stmt_close(&dbc->stm_stream_rm_file);
+		mysql_close(dbc->mysql_conn);
+	}
+
+	g_free(dbc);
+}
+
+static void clear_conn(db_conn_t **dbc) {
+	if (!*dbc)
+		return;
+	reset_conn(*dbc);
+	*dbc = NULL;
 }
 
 
-INLINE int prep(MYSQL_STMT **st, const char *s) {
-	*st = mysql_stmt_init(mysql_conn);
+INLINE int prep(db_conn_t *dbc, MYSQL_STMT **st, const char *s) {
+	*st = mysql_stmt_init(dbc->mysql_conn);
 	if (!*st)
 		return -1;
 	if (mysql_stmt_prepare(*st, s, strlen(s))) {
@@ -102,31 +149,42 @@ INLINE int prep(MYSQL_STMT **st, const char *s) {
 }
 
 
-static int check_conn(void) {
-	if (mysql_conn)
-		return 0;
-	if (!c_mysql_host || !c_mysql_db)
-		return -1;
+static bool db_wanted(void) {
+	return (c_mysql_host && c_mysql_db);
+}
+
+
+static db_conn_t *check_conn(void) {
+	pthread_mutex_lock(&db_conns_lock);
+	if (db_conns.head) {
+		db_conn_t *ret = t_queue_pop_head(&db_conns);
+		pthread_mutex_unlock(&db_conns_lock);
+		return ret;
+	}
+	pthread_mutex_unlock(&db_conns_lock);
+
 
 	dbg("connecting to MySQL");
 
-	mysql_conn = mysql_init(NULL);
-	if (!mysql_conn)
+	db_conn_t *dbc = g_new0(db_conn_t, 1);
+
+	dbc->mysql_conn = mysql_init(NULL);
+	if (!dbc->mysql_conn)
 		goto err;
-	if (!mysql_real_connect(mysql_conn, c_mysql_host, c_mysql_user, c_mysql_pass, c_mysql_db, c_mysql_port,
+	if (!mysql_real_connect(dbc->mysql_conn, c_mysql_host, c_mysql_user, c_mysql_pass, c_mysql_db, c_mysql_port,
 			NULL, CLIENT_IGNORE_SIGPIPE))
 		goto err;
-	if (mysql_select_db(mysql_conn, c_mysql_db))
+	if (mysql_select_db(dbc->mysql_conn, c_mysql_db))
 		goto err;
-	if (mysql_autocommit(mysql_conn, 0))
+	if (mysql_autocommit(dbc->mysql_conn, 0))
 		goto err;
 
-	if (prep(&stm_insert_call, "insert into recording_calls (call_id, start_timestamp, " \
+	if (prep(dbc, &dbc->stm_insert_call, "insert into recording_calls (call_id, start_timestamp, " \
 				"`status`) " \
 				"values " \
 				"(?,?,'recording')"))
 		goto err;
-	if (prep(&stm_insert_stream, "insert into recording_streams (`call`, local_filename, full_filename, " \
+	if (prep(dbc, &dbc->stm_insert_stream, "insert into recording_streams (`call`, local_filename, full_filename, " \
 				"file_format, " \
 				"output_type, " \
 				"stream_id, ssrc, " \
@@ -134,43 +192,49 @@ static int check_conn(void) {
 				"start_timestamp) values " \
 				"(?,concat(?,'.',?),concat(?,'.',?),?,?,?,?,?,?)"))
 		goto err;
-	if (prep(&stm_close_call, "update recording_calls set " \
+	if (prep(dbc, &dbc->stm_close_call, "update recording_calls set " \
 				"end_timestamp = ?, status = 'completed' where id = ? " \
 				"and status != 'completed'"))
 		goto err;
-	if (prep(&stm_delete_call, "delete from recording_calls where id = ?"))
+	if (prep(dbc, &dbc->stm_delete_call, "delete from recording_calls where id = ?"))
 		goto err;
 	if ((output_storage & OUTPUT_STORAGE_DB)) {
-		if (prep(&stm_close_stream, "update recording_streams set " \
-					"end_timestamp = ?, stream = ? where id = ?"))
+		if (prep(dbc, &dbc->stm_close_stream, "update recording_streams set " \
+					"end_timestamp = ?, stream = ?, storage_db = 1 where id = ?"))
 			goto err;
 	}
 	else {
-		if (prep(&stm_close_stream, "update recording_streams set " \
+		if (prep(dbc, &dbc->stm_close_stream, "update recording_streams set " \
 					"end_timestamp = ? where id = ?"))
 			goto err;
 	}
-	if (prep(&stm_delete_stream, "delete from recording_streams where id = ?"))
+	if (prep(dbc, &dbc->stm_delete_stream, "delete from recording_streams where id = ?"))
 		goto err;
-	if (prep(&stm_config_stream, "update recording_streams set channels = ?, sample_rate = ? where id = ?"))
+	if (prep(dbc, &dbc->stm_config_stream, "update recording_streams set channels = ?, sample_rate = ? where id = ?"))
 		goto err;
-	if (prep(&stm_insert_metadata, "insert into recording_metakeys (`call`, `key`, `value`) values " \
+	if (prep(dbc, &dbc->stm_stream_rm_file, "update recording_streams set storage_file = 0 where id = ?"))
+		goto err;
+	if (prep(dbc, &dbc->stm_stream_s3, "update recording_streams set storage_s3 = 1, s3_uri = ? where id = ?"))
+		goto err;
+	if (prep(dbc, &dbc->stm_stream_gcs, "update recording_streams set storage_gcs = 1, gcs_uri = ? where id = ?"))
+		goto err;
+	if (prep(dbc, &dbc->stm_insert_metadata, "insert into recording_metakeys (`call`, `key`, `value`) values " \
 				"(?,?,?)"))
 		goto err;
 
 	dbg("Connection to MySQL established");
 
-	return 0;
+	return dbc;
 
 err:
-	if (mysql_conn) {
-		ilog(LOG_ERR, "Failed to connect to MySQL: %s", mysql_error(mysql_conn));
-		reset_conn();
-	}
+	if (dbc->mysql_conn)
+		ilog(LOG_ERR, "Failed to connect to MySQL: %s", mysql_error(dbc->mysql_conn));
 	else
 		ilog(LOG_ERR, "Failed to connect to MySQL: out of memory");
 
-	return -1;
+	reset_conn(dbc);
+
+	return NULL;
 }
 
 
@@ -215,21 +279,24 @@ INLINE void my_ts(MYSQL_BIND *b, int64_t ts, double *d) {
 }
 
 
-static bool execute_wrap(MYSQL_STMT **stmt, MYSQL_BIND *binds, unsigned long long *auto_id) {
+static bool __execute_wrap(size_t stmt_offset, MYSQL_BIND *binds, unsigned long long *auto_id) {
 	int retr = 0;
 	while (1) {
-		if (check_conn())
+		MYSQL_STMT *stmt = NULL;
+		g_autoptr(db_conn_t) dbc;
+		if (!(dbc = check_conn()))
 			goto err;
-		if (mysql_stmt_bind_param(*stmt, binds))
+		stmt = G_STRUCT_MEMBER(MYSQL_STMT *, dbc, stmt_offset);
+		if (mysql_stmt_bind_param(stmt, binds))
 			goto err;
-		if (mysql_stmt_execute(*stmt))
+		if (mysql_stmt_execute(stmt))
 			goto err;
 		if (auto_id) {
-			*auto_id = mysql_insert_id(mysql_conn);
+			*auto_id = mysql_insert_id(dbc->mysql_conn);
 			if (*auto_id == 0)
 				goto err;
 		}
-		if (mysql_commit(mysql_conn))
+		if (mysql_commit(dbc->mysql_conn))
 			goto err;
 
 		return true;
@@ -237,20 +304,25 @@ static bool execute_wrap(MYSQL_STMT **stmt, MYSQL_BIND *binds, unsigned long lon
 err:
 		if (retr > 5) {
 			// fatal
-			ilog(LOG_ERR, "Failed to bind or execute prepared statement: %s",
-					mysql_stmt_error(*stmt));
-			reset_conn();
+			if (stmt)
+				ilog(LOG_ERR, "Failed to bind or execute prepared statement: %s",
+						mysql_stmt_error(stmt));
+			clear_conn(&dbc);
 			return false;
 		}
 		if (retr > 2) {
-			reset_conn();
-			if (check_conn())
+			clear_conn(&dbc);
+			if (!(dbc = check_conn()))
 				return false;
 		}
 
 		retr++;
 	}
 }
+
+
+#define execute_wrap(stmt, binds, auto_id) \
+	__execute_wrap(G_STRUCT_OFFSET(db_conn_t, stmt), binds, auto_id)
 
 
 static void db_do_call_id(metafile_t *mf) {
@@ -268,7 +340,7 @@ static void db_do_call_id(metafile_t *mf) {
 	double ts;
 	my_ts(&b[1], mf->start_time_us, &ts);
 
-	execute_wrap(&stm_insert_call, b, &mf->db_id);
+	execute_wrap(stm_insert_call, b, &mf->db_id);
 }
 static void db_do_call_metadata(metafile_t *mf) {
 	if (mf->db_metadata_done)
@@ -289,7 +361,7 @@ static void db_do_call_metadata(metafile_t *mf) {
 			my_str(&b[1], key);
 			my_str(&b[2], l->data);
 
-			execute_wrap(&stm_insert_metadata, b, NULL);
+			execute_wrap(stm_insert_metadata, b, NULL);
 		}
 	}
 
@@ -297,7 +369,7 @@ static void db_do_call_metadata(metafile_t *mf) {
 }
 
 void db_do_call(metafile_t *mf) {
-	if (check_conn())
+	if (!db_wanted())
 		return;
 
 	db_do_call_id(mf);
@@ -307,9 +379,11 @@ void db_do_call(metafile_t *mf) {
 
 // mf is locked
 void db_do_stream(metafile_t *mf, output_t *op, stream_t *stream, unsigned long ssrc) {
-	if (check_conn())
+	if (!db_wanted())
 		return;
 	if (mf->db_id == 0)
+		return;
+	if (!op)
 		return;
 	if (op->db_id > 0)
 		return;
@@ -347,14 +421,14 @@ void db_do_stream(metafile_t *mf, output_t *op, stream_t *stream, unsigned long 
 	double ts;
 	my_ts(&b[10], op->start_time_us, &ts);
 
-	execute_wrap(&stm_insert_stream, b, &op->db_id);
+	execute_wrap(stm_insert_stream, b, &op->db_id);
 
 	if (op->db_id > 0)
 		mf->db_streams++;
 }
 
 void db_close_call(metafile_t *mf) {
-	if (check_conn())
+	if (!db_wanted())
 		return;
 	if (mf->db_id == 0)
 		return;
@@ -367,18 +441,18 @@ void db_close_call(metafile_t *mf) {
 		double ts;
 		my_ts(&b[0], now, &ts);
 		my_ull(&b[1], &mf->db_id);
-		execute_wrap(&stm_close_call, b, NULL);
+		execute_wrap(stm_close_call, b, NULL);
 	}
 	else {
 		my_ull(&b[0], &mf->db_id);
-		execute_wrap(&stm_delete_call, b, NULL);
+		execute_wrap(stm_delete_call, b, NULL);
 		mf->db_id = 0;
 	}
 }
 
 
 static bool do_notify(notif_req_t *req) {
-	if (check_conn())
+	if (!db_wanted())
 		return false;
 
 	MYSQL_BIND b[3];
@@ -392,10 +466,7 @@ static bool do_notify(notif_req_t *req) {
 	}
 	my_ull(&b[par_idx++], &req->db_id);
 
-	bool ok = execute_wrap(&stm_close_stream, b, NULL);
-
-	// running in a thread pool, don't leave connection behind
-	reset_conn();
+	bool ok = execute_wrap(stm_close_stream, b, NULL);
 
 	return ok;
 }
@@ -437,7 +508,7 @@ void db_close_stream(output_t *op) {
 
 
 void db_delete_stream(metafile_t *mf, output_t *op) {
-	if (check_conn())
+	if (!db_wanted())
 		return;
 	if (op->db_id == 0)
 		return;
@@ -445,13 +516,13 @@ void db_delete_stream(metafile_t *mf, output_t *op) {
         MYSQL_BIND b[1];
 	my_ull(&b[0], &op->db_id);
 
-	execute_wrap(&stm_delete_stream, b, NULL);
+	execute_wrap(stm_delete_stream, b, NULL);
 
 	mf->db_streams--;
 }
 
 void db_config_stream(output_t *op) {
-	if (check_conn())
+	if (!db_wanted())
 		return;
 	if (op->db_id == 0)
 		return;
@@ -461,9 +532,43 @@ void db_config_stream(output_t *op) {
 	my_i(&b[1], &op->encoder->actual_format.clockrate);
 	my_ull(&b[2], &op->db_id);
 
-	execute_wrap(&stm_config_stream, b, NULL);
+	execute_wrap(stm_config_stream, b, NULL);
 }
 
-void db_thread_end(void) {
-	reset_conn();
+void db_set_s3(unsigned long long db_id, const char *uri) {
+	if (!db_wanted())
+		return;
+	if (db_id == 0)
+		return;
+
+	MYSQL_BIND b[2];
+	my_cstr(&b[0], uri);
+	my_ull(&b[1], &db_id);
+
+	execute_wrap(stm_stream_s3, b, NULL);
+}
+
+void db_set_gcs(unsigned long long db_id, const char *uri) {
+	if (!db_wanted())
+		return;
+	if (db_id == 0)
+		return;
+
+	MYSQL_BIND b[2];
+	my_cstr(&b[0], uri);
+	my_ull(&b[1], &db_id);
+
+	execute_wrap(stm_stream_gcs, b, NULL);
+}
+
+void db_rm_file(output_t *op) {
+	if (!db_wanted())
+		return;
+	if (op->db_id == 0)
+		return;
+
+	MYSQL_BIND b[1];
+	my_ull(&b[0], &op->db_id);
+
+	execute_wrap(stm_stream_rm_file, b, NULL);
 }

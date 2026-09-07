@@ -3,7 +3,7 @@
 #include <assert.h>
 #include "resample.h"
 #include "codeclib.h"
-#include "fix_frame_channel_layout.h"
+#include "fix_frame_channel_layout.compat"
 #include "main.h"
 
 struct rtpengine_config rtpe_config;
@@ -57,8 +57,4 @@ int main(void) {
 	test_1(160, AV_SAMPLE_FMT_S16, 8000, 1, true, AV_SAMPLE_FMT_S16, 16000, 1, 320);
 
 	return 0;
-}
-
-int get_local_log_level(unsigned int u) {
-	return 7;
 }

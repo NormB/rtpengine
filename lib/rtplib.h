@@ -84,6 +84,16 @@ union codec_format_options {
 
 		int minptime; // obsolete
 	} opus;
+
+	struct {
+		int packetization_mode:3;
+
+		int profile_idc:8;
+		int profile_iop:8;
+		int level_idc:8;
+
+		int level_asymmetry_allowed:1;
+	} h264;
 };
 
 struct rtp_codec_format {
@@ -102,9 +112,12 @@ struct rtp_payload_type {
 	str encoding_with_params; // "opus/48000/2"
 	str encoding_with_full_params; // "opus/48000/1"
 	str encoding; // "opus"
-	unsigned int clock_rate; // 48000
+	unsigned int clock_rate; // 48000 or 90000
 	str encoding_parameters; // "2"
 	int channels; // 2
+	int width;
+	int height;
+	unsigned int time_base; // 48000 or 30
 	str format_parameters; // value of a=fmtp
 	str codec_opts; // extra codec-specific options
 	GQueue rtcp_fb; // a=rtcp-fb:...

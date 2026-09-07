@@ -66,6 +66,9 @@ Currently the following commands are defined:
 * inject start
 * inject stop
 * connect
+* create
+* create answer
+* mesh
 
 The response dictionary must contain at least one key called `result`.
 The value can be either `ok` or `error`.
@@ -334,24 +337,6 @@ Optionally included keys are:
 
 		Reverts the `passive` setting. Only useful if the `dtls-passive` config option is set.
 
-* `DTLS-reverse`
-
-	Contains a string and influences the behaviour of DTLS-SRTP. Unlike the regular `DTLS` flag, this one
-	is used to control behaviour towards DTLS that was offered to *rtpengine*. In particular, if `passive`
-	mode is used, it prevents *rtpengine* from prematurely sending active DTLS connection attempts.
-	Possible values are:
-
-	- `passive`
-
-		Instructs *rtpengine* to prefer the passive (i.e. server) role for the DTLS
-		handshake. The default is to take the active (client) role if possible. This is useful in cases
-		where the SRTP endpoint isn't able to receive or process the DTLS handshake packets, for example
-		when it's behind NAT or needs to finish ICE processing first.
-
-	- `active`
-
-		Reverts the `passive` setting. Only useful if the `dtls-passive` config option is set.
-
 * `DTLS-fingerprint`
 
 	Contains a string and is used to select the hashing function to generate the DTLS fingerprint
@@ -435,11 +420,13 @@ Optionally included keys are:
 	received RTCP packets will not simply be passed through as usual, but
 	instead will be consumed, and instead *rtpengine* will generate its own
 	RTCP packets to send to the RTP peers. This flag will be effective for
-	both sides of a call.
+	both sides of a call. If Homer is configured, the generated RTCP reports
+    are also sent to Homer (even when no original RTCP was received).
 
 * `ICE`
 
-	Contains a string which must be one of the following values:
+    Contains a list of strings, or alternatively a single string, each of which
+    must be one of the following values:
 
 	With `remove`, any ICE attributes are stripped from the SDP body. Also
 	see the flag `reject ICE` to effect an early removal of ICE support
@@ -461,7 +448,17 @@ Optionally included keys are:
 	low-priority candidate. This used to be the default behaviour in previous versions of
 	*rtpengine*.
 
+    Adding `trickle` to the list of strings is identical to using the `trickle
+    ICE` flag described below.
+
 	The default behaviour (no `ICE` key present at all) is the same as `default`.
+
+    To influence behaviour related to ICE-lite, flags can be included in this
+    list here instead of using the separate `ICE-lite=` option. For example,
+    instead of using `ICE-lite=both`, the flag `lite-both` can be included in
+    this list.
+
+    Adding `ice2` to the list will advertise support for ICE2 in an outgoing offer.
 
 	This flag operates independently of the `replace` flags.
 
@@ -830,6 +827,12 @@ Optionally included keys are:
 		dictionary. The response dictionary may also contain the optional key `message` with
 		an explanatory string. No other key is required in the response dictionary.
 
+	* `rollback`
+
+		Indicates that the controlling SIP proxy understands the `rollback`
+		message. If `rollback` is listed, *rtpengine* includes it in a
+		`supported` list in the response.
+
 * `to-interface`
 
     Contains a string identifying the network interface pertaining to the
@@ -1043,6 +1046,17 @@ Spaces in each string may be replaced by hyphens.
 	Corresponds to the *rtpproxy* `a` flag. Advertises an RTP endpoint which uses asymmetric
 	RTP, which disables learning of endpoint addresses (see below).
 
+* `bidirectional`
+
+    For `publish` messages, support bidirectional media flow, i.e. don't
+    respond with `recvonly` media but instead respond with `sendrecv`.
+
+    Similarly, for `subscribe request` messages, respond with `sendrecv`
+    instead of `sendonly`.
+
+    For `connect` messages, in addition to `directional` sets up media flow in
+    both directions.
+
 * `block DTMF`
 
     Useful in `offer` or `answer` messages to immdiately enable DTMF blocking
@@ -1073,6 +1087,16 @@ Spaces in each string may be replaced by hyphens.
 	When present in a message that sets up codec handlers, enables
 	the DSP to detect in-band DTMF audio tones even when it
 	wouldn't otherwise be necessary.
+
+* `directional`
+
+    Directional methods (block/unblock media/DTMF, and start/stop forwarding)
+    ignore a given `from-tag` by default, in order to support easy operation
+    against controlling agents which always insert one. Adding this flags makes
+    *rtpengine* honour the `from-tag`.
+
+    For `connect` messages, sets up additional media subscriptions instead of
+    doing a full transfer.
 
 * `discard recording`
 
@@ -1147,6 +1171,19 @@ Spaces in each string may be replaced by hyphens.
 	allows endpoint addresses to change on the fly without going through signalling again. Note that
 	this opens a security hole and potentially allows RTP streams to be hijacked, either partly or
 	in whole.
+
+* `mix`
+
+    For a subscribe request to subscribe to multiple source medias (e.g.
+    subscribe to the audio of both parties to a regular call), instead of
+    producing one output media per source media (e.g. two output audio media),
+    produce one output media for each type of source media (e.g. just one
+    output audio media). All affected RTP flows will then be sent as part of
+    the same output media.
+
+    Not that this doesn't enable actual audio mixing. The `audio player`
+    feature can be used to produce a single mixed output audio stream which
+    combines all audio input into one.
 
 * `NAT-wait`
 
@@ -1340,6 +1377,19 @@ Spaces in each string may be replaced by hyphens.
 	and port of incoming packets after the learning phase and compare them with the endpoint
 	address that has been learned before. If there's a mismatch, the packet will be dropped and
 	not forwarded.
+
+* `track state`
+
+	Enables rollback checkpoints for the selected dialogue. Before applying an
+	`offer`, *rtpengine* records the media state from the last completed
+	offer/answer exchange. A successful `answer` commits the exchange and
+	discards the pending checkpoint. Once enabled, subsequent offers for the
+	dialogue are checkpointed without repeating the flag. The spelling
+	`track-state` is equivalent.
+
+	Checkpointing is opt-in because a pending checkpoint retains media and
+	cryptographic configuration. Calls that do not use this flag do not retain
+	that state.
 
 * `trickle ICE`
 
@@ -1757,8 +1807,10 @@ An example of a complete `offer` request dictionary could be (SDP body abbreviat
 	"ICE": "force", "transport protocol": "RTP/SAVPF", "media address": "2001:d8::6f24:65b",
 	"DTLS": "passive" }
 
-A response message contains only the key `sdp` in addition to `result`, which contains the re-written
-SDP body that the SIP proxy should insert into the SIP message.
+A response message contains the key `sdp` in addition to `result`, which contains the re-written
+SDP body that the SIP proxy should insert into the SIP message. If `supports`
+requested a supported extension, the response can also contain a `supported`
+list.
 
 Example response:
 
@@ -1801,6 +1853,70 @@ the `direction` key in the `answer` message.
 
 The reply message is identical as in the `offer` reply.
 
+## `rollback` Message
+
+The `rollback` message restores a dialogue to the media state from its last
+completed offer/answer exchange without deleting the call. It is intended for
+use when an SDP offer has already been applied by *rtpengine* but the remote
+endpoint subsequently rejects the signalling transaction. The signalling
+element must issue the message explicitly; *rtpengine* does not observe SIP
+transaction outcomes.
+
+The request must contain `call-id`, `from-tag`, and `to-tag`. It may also
+contain:
+
+* `via-branch`
+
+	Selects a particular fork using the same dialogue matching rules as other
+	NG messages.
+
+The successful response contains `rolled-back`, set to `1` if a pending
+checkpoint was restored or `0` if there was none outstanding. Repeating a
+successful rollback is therefore safe and returns `rolled-back: 0`.
+
+Each side of a dialogue holds at most one outstanding checkpoint. Offers that
+arrive before an exchange completes belong to the same uncommitted exchange and
+keep the existing snapshot, so a rollback returns to the last completed
+offer/answer rather than to an intermediate one. A signalling element should
+not therefore issue a new offer for a dialogue while a rollback for it is still
+in flight: the rollback restores the last completed state and the newer offer is
+undone with it.
+
+Rollback restores addresses and ports, codecs and payload mappings, transport
+profile, media direction, and SDES configuration including keys. ICE
+credentials are restored and connectivity checks reconstruct candidate-pair
+and nomination state. DTLS fingerprint, TLS ID, and setup/role configuration
+are restored, but the live OpenSSL association is not serializable and must
+perform a new handshake.
+
+State the rejected offer introduced is removed as well as overwritten. An offer
+that upgraded a media to DTLS-SRTP, for example, leaves behind no TLS ID,
+fingerprint or SRTP context once it has been rolled back.
+
+Where a call has been forked, the offering side is shared between the branches.
+Its checkpoint is taken once, before the first uncommitted offer, so rolling
+back one branch does not disturb what rolling back another has already
+restored.
+
+Merging calls, as `connect` and `mesh` do, discards any outstanding checkpoint.
+The merged call renumbers the state a snapshot refers to, so a rollback after a
+merge reports none outstanding.
+
+Sockets and endpoint maps allocated for a rejected offer are not released by a
+rollback. The media is returned to the sockets it was using, and the surplus is
+reclaimed with the call.
+
+When calls are restored from Redis, checkpoint data is auxiliary: a checkpoint
+that cannot be read is discarded in full while the call itself is restored
+without rollback capability.
+
+Example request and response:
+
+	{ "command": "rollback", "call-id": "cfBXzDSZqhYNcXM",
+	  "from-tag": "mS9rSAn0Cr", "to-tag": "yB3KjLa9" }
+
+	{ "result": "ok", "rolled-back": 1 }
+
 ## `delete` Message
 
 The `delete` message must contain at least the keys `call-id` and `from-tag` and may optionally include
@@ -1813,6 +1929,12 @@ of zero or more strings. The following flags are defined:
 	(such as unknown call-ID) shall
 	result in an error reply (i.e. `"result": "error"`). The default is to reply with a warning only
 	(i.e. `"result": "ok", "warning": ...`).
+
+* `fast`
+
+    Omit adding statistics to the response message. This makes processing of
+    the delete message more light-weight and produces a smaller response
+    message, which is beneficial if the statistics aren't needed.
 
 * `to-tag`
 
@@ -2166,31 +2288,36 @@ Alternatively the `stop recording` message can be used if either the string
 
 ## `block DTMF` and `unblock DTMF` Messages
 
-These message types must include the key `call-id` in the message. They enable and disable blocking of DTMF
-events (RFC 4733 type packets), respectively.
+These message types must include the key `call-id` in the message. They enable
+and disable blocking of DTMF events (RFC 4733 type packets), respectively.
 
-Packets can be blocked for an entire call if only the `call-id` key is present in the message, or can be blocked
-directionally for individual participants. Participants can be selected by their SIP tag if the `from-tag` key
-is included in the message, they can be selected by their SDP media address if the `address` key is included
-in the message, or they can be selected by the user-provided `label` if the `label` key is included in the
-message. For an address, it can be an IPv4 or IPv6 address, and any participant that is
-found to have a matching address advertised as their SDP media address will have their originating RTP
-packets blocked (or unblocked).
+Packets can be blocked for an entire call if only the `call-id` key is present
+in the message, or can be blocked directionally for individual participants.
+Participants can be selected by their SIP tag if both the `from-tag` key is
+included in the message and the flag `directional` is present, they can be
+selected by their SDP media address if the `address` key is included in the
+message, or they can be selected by the user-provided `label` if the `label`
+key is included in the message. For an address, it can be an IPv4 or IPv6
+address, and any participant that is found to have a matching address
+advertised as their SDP media address will have their originating RTP packets
+blocked (or unblocked).
 
 Unblocking packets for the entire call (i.e. only `call-id` is given) does not
 automatically unblock packets for participants which had their packets blocked
 directionally, unless the string `all` (equivalent to setting `all=all`) is
 included in the `flags` section of the message.
 
-When DTMF blocking is enabled, DTMF event packets will not be forwarded to the receiving peer.
-If DTMF logging is enabled, DTMF events will still be logged to syslog while blocking is enabled. Blocking
-of DTMF events can be enabled and disabled at any time during call runtime.
+When DTMF blocking is enabled, DTMF event packets will not be forwarded to the
+receiving peer.  If DTMF logging is enabled, DTMF events will still be logged
+to syslog while blocking is enabled. Blocking of DTMF events can be enabled and
+disabled at any time during call runtime.
 
 ## `block media` and `unblock media` Messages
 
-Analogous to `block DTMF` and `unblock DTMF` but blocks media packets instead of DTMF packets. DTMF packets
-can still pass through when media blocking is enabled. Media packets can be blocked for an entire call, or
-directionally for individual participants. See `block DTMF` above for details.
+Analogous to `block DTMF` and `unblock DTMF` but blocks media packets instead
+of DTMF packets. DTMF packets can still pass through when media blocking is
+enabled. Media packets can be blocked for an entire call, or directionally for
+individual participants. See `block DTMF` above for details.
 
 In addition to blocking media for just one call participant, it's possible to
 block media for just a single media flow. This is relevant to scenarios that
@@ -2246,6 +2373,12 @@ Media files can be provided through one of these keys:
 	Contains a binary blob (string) of the contents of a media file. Due to the limitations of the
 	*ng* transport protocol, only very short files can be provided this way, and so this is primarily
 	useful for testing and debugging.
+
+* `blob64`
+
+    Alternative to `blob` which expects a binary media file in base64 encoding.
+    This is useful for transports which don't natively support binary data
+    (e.g. JSON).
 
 * `db-id`
 
@@ -2528,9 +2661,16 @@ Similar to an `offer` message except that it is used outside of an offer/answer
 scenario. The media described by the SDP is published to *rtpengine* directly,
 and other peer can then subscribe to the published media to receive a copy.
 
-The message must include the key `sdp` which should describe `sendonly` media;
-and the key `call-id` and `from-tag` to identify the publisher. Most other keys
-and options supported by `offer` are also supported for `publish`.
+The message must include the key `sdp` which should describe `sendonly` media
+(but see below).
+
+The keys `call-id` and `from-tag` may be included to identify the publisher,
+and may refer to an existing publisher or participant to a call. If these keys
+are absent, random strings will be generated to create a new call and/or
+publisher, and they will be returned in the response message.
+
+Most other keys and options supported by `offer` are also supported for
+`publish`.
 
 The reply message will contain an answer SDP in `sdp`, but unlike with `offer`
 this is not a rewritten version of the received SDP, but rather a `recvonly`
@@ -2538,6 +2678,9 @@ answer SDP generated by *rtpengine* locally. Only one codec for each media
 section will be listed, and by default this will be the first supported codec
 from the published media. This can be influenced with the `codec` options
 described above, in particular the `accept` option.
+
+The flag `bidirectional` may be included to support `sendrecv` media instead of
+forcing a `recvonly` and `sendonly` pair.
 
 The list of codecs given in the `accept` option is treated as a list of codec
 preferences, with the first codec listed being the most preferred codec to be
@@ -2547,7 +2690,10 @@ the first codec that is supported for transcoding is selected. If no such codec
 is present, then the offer is rejected. The special string `any` can be given
 in the `accept` list to influence this behaviour: If `any` is listed, then the
 first codec from the offer is accepted even if it's not supported for
-transcoding.
+transcoding. The special string `all` can be given in the `accept` list to
+keep all codecs that are supported for transcoding (and their supplemental
+codecs), removing only unsupported codecs. If both `all` and `any` are given,
+all codecs from the offer are kept without removing any.
 
 ## `subscribe request` Message
 
@@ -2567,11 +2713,12 @@ subscription. This new call participant will be identified by a newly generated
 unique tag, or by the tag given in the `to-tag` key. If a label is to be set
 for the newly created subscription, it can be set through `set-label`.
 
-The reply message will contain a sendonly offer SDP in `sdp` which by default
-will mirror the SDP of the call participant being subscribed to. If multiple
-call participants are subscribed to at the same time, then this SDP will
-contain multiple media sections, combined out of the media sections of all
-selected call participants. This offer SDP can be manipulated with the same
+The reply message will contain a sendonly offer SDP (unless the flag
+`bidirectional` is given, in which case the SDP will be `sendrecv`) in `sdp`
+which by default will mirror the SDP of the call participant being subscribed
+to. If multiple call participants are subscribed to at the same time, then this
+SDP will contain multiple media sections, combined out of the media sections of
+all selected call participants. This offer SDP can be manipulated with the same
 flags as used in an `offer` message, including the option to manipulate the
 codecs. The reply message will also contain the `from-tags` (corresponding to
 the call participants being subscribed to) and the `to-tag` (corresponding to
@@ -2659,12 +2806,12 @@ Example:
 
 ## `connect` Message
 
-This message makes it posible to directly connect the media of two call parties
+This message makes it possible to directly connect the media of two call parties
 without the need for a full offer/answer exchange. The required keys are
-`call-id` to identify the call, and `from-tag and `to-tag` to identify the two
-call parties to connect. The media will be connected in the same way as it
-would through an offer/answer exchange. Transcoding will automaticaly be
-engaged if needed.
+`call-id` to identify the call, and `from-tag` and `to-tag` to identify the two
+call parties to connect. By default, the media will be connected in the same
+way as it would through an offer/answer exchange. Transcoding will
+automatically be engaged if needed.
 
 It's also possible to connect two call parties from two different calls
 (different call IDs). To do so, the second call ID must be given as
@@ -2673,3 +2820,78 @@ that second call. Internally, both calls will be merged into a single call
 object, with both call IDs then corresponding to the same call. This will be
 visible in certain statistics (e.g. two call IDs appearing in the list, but
 only one call being counted).
+
+Adding the flag `directional` changes the behaviour from doing a full call
+transfer (similar to an offer/answer) to only setting up additional media
+subscriptions. In this mode, `connect` instructs *rtpengine* that (a copy of
+the) media received from the call party identified by the `from-tag` shall also
+be delivered to the call party identified by the `to-tag`. Other existing media
+subscriptions are not affected.
+
+Directional mode also makes it possible to specify not just one `from-tag` but
+multiple call parties in order to create multiple new subscriptions with a
+single call. This can be done either with a list of tags in `from-tags` or
+using the `all` flag described elsewhere.
+
+In addition to `directional`, the flag `bidirectional` can be set to set up
+subscriptions not just from the `from-tag` to the `to-tag`, but also in the
+other direction at the same time.
+
+Note that creating multiple source subscriptions for a single destination
+doesn't automatically create a typical "conference" scenario. Specifically, by
+default the destination would get multiple RTP streams delivered, which may be
+acceptable for some clients, but isn't what is usually expected. The `audio
+player` feature described elsewhere is a useful option for this.
+
+## `create` and `create answer` Messages
+
+The `create` message can be used to create a new call, a new party to a call,
+or produce an offer SDP that corresponds to an existing call party. It returns
+an SDP body that can be used to make an "offer" to a remote party.
+
+The keys `call-id` and `from-tag` may be included to identify an existing call
+and/or call party. If the call or call party doesn't yet exist, a new one will
+be created. If these keys are absent, a random string will be generated and
+will be returned in the response message.
+
+If the call party already exists, then an SDP body with attributes
+corresponding to that call party will be returned, i.e. with all established
+media sections, transport protocols, codecs, etc.
+
+A newly created call party will receive a set of standard attributes: one audio
+media, plain RTP, and PCMA and PCMU codecs. These attributes can be adjusted
+with the usual flags described above (e.g. `transport-protocol`, `ICE`, etc). A
+list of audio codecs can be given as `codecs-offer`.
+
+If multiple media sections are needed (e.g. audio and video), a list can be
+given as `medias=[...]`. Each entry in the list should contain a string `type`
+and a list of codec strings in `codecs`. For example: `medias=[[type=audio
+codecs=[G722 PCMA]] [type=video codecs=[VP8 VP9]]]`
+
+The corresponding answer SDP (i.e. the answer received to the SDP returned by
+`create`) can then be passed to *rtpengine* as a `create answer` message. The
+SDP must be placed as `sdp` in the message, and the keys `call-id` and
+`from-tag` must be filled appropriated.
+
+## `mesh` Message
+
+This method can be used to merge an arbitrary number of separate calls into
+one, and/or to establish arbitrary media flows between parties to a call.
+
+The request dictionary must include the key `calls` containing a list of
+strings. Each string identifies an existing call by call ID. At least one call
+must be given. If multiple calls are given, they will be merged into one, and
+all call IDs will become aliases to that one call.
+
+The optional key `tags` contains a list of dictionary, each in the format of
+`{from=STRING, to=[STRING, STRING, ...]}`. Each string identifies a party to
+the (possibly merged) call by its tag. This establishes media flow from each
+given `from` call party to each one of the `to` call parties.
+
+Other dictionary keys and the `flags` list are honoured as usual. The flag
+`unsubscribe` can be given to reset the media subscriptions for each given
+`from` call party before establishing the new media flows. The flag
+`bidirectional` can be given to establish (and also reset) media flows in both
+directions for each given pair.
+
+To facilitate audio mixing, see the `audio player` options described above.

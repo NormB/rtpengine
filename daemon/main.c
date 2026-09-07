@@ -29,7 +29,7 @@
 #include "control_udp.h"
 #include "control_ng.h"
 #include "helpers.h"
-#include "log.h"
+#include "log_d.h"
 #include "call.h"
 #include "kernel.h"
 #include "redis.h"
@@ -59,7 +59,6 @@
 #include "janus.h"
 #include "nftables.h"
 #include "bufferpool.h"
-#include "log_funcs.h"
 #include "uring.h"
 #include "ng_client.h"
 
@@ -82,6 +81,7 @@ static GQueue rtpe_cli = G_QUEUE_INIT;
 GQueue rtpe_control_ng = G_QUEUE_INIT;
 GQueue rtpe_control_ng_tcp = G_QUEUE_INIT;
 struct bufferpool *shm_bufferpool;
+struct bufferpool *static_bufferpool;
 struct bufferpool *rtpe_bufferpool;
 memory_arena_t rtpe_arena;
 
@@ -126,6 +126,7 @@ struct rtpengine_config rtpe_config = {
 	.timer_accuracy = 500,
 	.ng_client_timeout = 50, // ms, will be scaled to us by *1000
 	.ng_client_retries = 5,
+	.kernel_num_threads = -1,
 };
 
 struct interface_config_callback_arg {
@@ -279,6 +280,66 @@ static void __resolve_ifname(const char *s, GQueue *addrs) {
 	freeaddrinfo(res);
 }
 
+static bool rtp_port_valid(unsigned int port) {
+	return port >= 1 && port <= 65535;
+}
+static unsigned int parse_interface_rtp_port(const char *value, const char *option,
+		const char *interface_name)
+{
+	char *endptr;
+	unsigned int port;
+	unsigned long port_l; // INT_MAX guard
+
+	errno = 0;
+	/* due to not having pure stroui(), keep unsigned long
+	 * for the port value locally, because the strtoul() is used.
+	 */
+	port_l = strtoul(value, &endptr, 10);
+	if (port_l > INT_MAX)
+		die("Invalid '%s' for interface '%s': '%lu' (must be in range 1-65535)", option, interface_name, port_l);
+
+	port = (unsigned int)port_l;
+
+	while (g_ascii_isspace(*endptr))
+		endptr++;
+
+	if (endptr == value || errno == ERANGE || *endptr != '\0' || !rtp_port_valid(port))
+		die("Invalid '%s' for interface '%s': '%s'", option, interface_name, value);
+
+	return port;
+}
+
+/**
+ * Validate global port range when parsing config.
+ */
+static void validate_global_rtp_port_range(void) {
+	if (!rtp_port_valid(rtpe_config.port_min))
+		die("Invalid RTP port range: --port-min must be between 1 and 65535");
+
+	if (!rtp_port_valid(rtpe_config.port_max))
+		die("Invalid RTP port range: --port-max must be between 1 and 65535");
+
+	if (rtpe_config.port_min > rtpe_config.port_max)
+		die("Invalid RTP port range: --port-min (%d) must not be greater than --port-max (%d)",
+				rtpe_config.port_min, rtpe_config.port_max);
+}
+/**
+ * Validate per iface port range when parsing config.
+ */
+static void validate_interface_rtp_port_range(const struct intf_config *ic) {
+	if (!rtp_port_valid(ic->port_min))
+		die("Invalid RTP port range for iface '" STR_FORMAT "': port-min must be between 1 and 65535",
+				STR_FMT(&ic->name));
+
+	if (!rtp_port_valid(ic->port_max))
+		die("Invalid RTP port range for iface '" STR_FORMAT "': port-max must be between 1 and 65535",
+				STR_FMT(&ic->name));
+
+	if (ic->port_min > ic->port_max)
+		die("Invalid RTP port range for iface '" STR_FORMAT "': port-min (%u) must not be greater than port-max (%u)",
+				STR_FMT(&ic->name), ic->port_min, ic->port_max);
+}
+
 static void if_add_alias(intf_config_q *q, const str *name, const char *alias) {
 	struct intf_config *ifa = g_new0(__typeof(*ifa), 1);
 	ifa->name = str_dup_str(name);
@@ -296,12 +357,16 @@ static bool if_add(intf_config_q *q, struct ifaddrs *ifas, const str *name,
 	/* address */
 	sockaddr_t *addr = g_new(__typeof(*addr), 1);
 	if (sockaddr_parse_any(addr, address)) {
-		if (is_addr_unspecified(addr))
+		if (is_addr_unspecified(addr)) {
+			g_free(addr);
 			return false;
+		}
 		g_queue_push_tail(&addrs, addr);
 	}
 	else {
 		g_free(addr);
+		addr = NULL;
+
 		// could be an interface name?
 		ilog(LOG_DEBUG, "Could not parse '%s' as network address, checking to see if "
 				"it's an interface", address);
@@ -311,10 +376,12 @@ static bool if_add(intf_config_q *q, struct ifaddrs *ifas, const str *name,
 			ilog(LOG_DEBUG, "'%s' is not an interface, attempting to resolve it as DNS host name", address);
 			__resolve_ifname(address, &addrs);
 		}
-	}
 
-	if (!addrs.length) // nothing found
-		return false;
+		// if still nothing found
+		if (!addrs.length) {
+			return false;
+		}
+	}
 
 	sockaddr_t adv = {0};
 	if (adv_addr) {
@@ -325,8 +392,10 @@ static bool if_add(intf_config_q *q, struct ifaddrs *ifas, const str *name,
 				return false;
 			}
 		}
-		if (is_addr_unspecified(&adv))
+		if (is_addr_unspecified(&adv)) {
+			g_free(addr);
 			return false;
+		}
 	}
 
 	while ((addr = g_queue_pop_head(&addrs))) {
@@ -374,18 +443,16 @@ static void add_if_from_config(const char *name, charp_ht ht, struct interface_c
 
 	unsigned int port_min = 0, port_max = 0;
 	char *p = t_hash_table_lookup(ht, "port-min");
-	if (p) {
-		port_min = atoi(p);
-		if (!port_min)
-			die("Invalid 'port-min' for interface '%s'", name);
-	}
+	if (p)
+		port_min = parse_interface_rtp_port(p, "port-min", name);
 
 	p = t_hash_table_lookup(ht, "port-max");
-	if (p) {
-		port_max = atoi(p);
-		if (!port_max)
-			die("Invalid 'port-max' for interface '%s'", name);
-	}
+	if (p)
+		port_max = parse_interface_rtp_port(p, "port-max", name);
+
+	if (port_min > port_max)
+		die("Invalid RTP port range for iface '%s': port min (%d) must not be greater than port max (%d)",
+				name, port_min, port_max);
 
 	GList *exclud = NULL;
 	p = t_hash_table_lookup(ht, "exclude-ports");
@@ -432,7 +499,7 @@ static void do_transcode_config(const char *name, charp_ht ht, struct transcode_
 	if (!codec_parse_payload_type(&tc->i.src, STR_PTR(tc->src)))
 		die("Failed to parse source codec '%s' in transcode config '%s'", src, name);
 	if (!codec_parse_payload_type(&tc->i.dst, STR_PTR(tc->dst)))
-		die("Failed to parse source codec '%s' in transcode config '%s'", src, name);
+		die("Failed to parse destination codec '%s' in transcode config '%s'", dst, name);
 
 	char *tfm = t_hash_table_lookup(ht, "transform");
 	char *pref_s = t_hash_table_lookup(ht, "preference");
@@ -499,10 +566,16 @@ static bool if_addr_parse(intf_config_q *q, char *s, struct ifaddrs *ifas) {
 }
 
 
-
+/**
+ * Sets hostname and auth.
+ */
 static int redis_ep_parse(endpoint_t *ep, int *db, char **hostname, char **auth, const char *auth_env, char *s) {
 	char *sl, *sp;
 	long l;
+
+	/* ensure to have pointers nulled */
+	*auth = NULL;
+	*hostname = NULL;
 
 	sl = strrchr(s, '@');
 	if (sl) {
@@ -516,16 +589,14 @@ static int redis_ep_parse(endpoint_t *ep, int *db, char **hostname, char **auth,
 	if (db) {
 		sl = strchr(s, '/');
 		if (!sl)
-			return -1;
+			goto error;
 		*sl = 0;
 		sl++;
 		if (!*sl)
-			return -1;
+			goto error;
 		l = strtol(sl, &sl, 10);
-		if (*sl != 0)
-			return -1;
-		if (l < 0)
-			return -1;
+		if (*sl != 0 || l < 0)
+			goto error;
 		*db = l;
 	}
 
@@ -537,8 +608,15 @@ static int redis_ep_parse(endpoint_t *ep, int *db, char **hostname, char **auth,
 		*hostname = g_strdup(s);
 
 	if (!endpoint_parse_any_getaddrinfo_full(ep, s))
-		return -1;
+		goto error;
+
 	return 0;
+error:
+	if (*hostname)
+		g_free(*hostname);
+	if (*auth)
+		g_free(*auth);
+	return -1;
 }
 
 
@@ -676,13 +754,15 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 	g_autoptr(char) templates_section = NULL;
 	g_autoptr(char) interfaces_config = NULL;
 	g_autoptr(char) transcode_config = NULL;
+	g_autoptr(char) ssrc_reporting = NULL;
 	int silent_timeout = 0;
 	int timeout = 0;
 	int final_timeout = 0;
 	int offer_timeout = 0;
 	int delete_delay = 30;
-	int media_expire = 0;
-	int db_expire = 0;
+	int media_files_expire = 0;
+	int db_media_expire = 0;
+	int db_cache_expire = 0;
 	int rtcp_interval = 0;
 	int redis_disable_time = 10;
 	int mqtt_publish_interval = 5000;
@@ -765,9 +845,11 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		{ "xmlrpc-format",'x', 0, G_OPTION_ARG_INT,	&rtpe_config.fmt,	"XMLRPC timeout request format to use. 0: SEMS DI, 1: call-id only, 2: Kamailio",	"INT"	},
 		{ "num-threads",  0, 0, G_OPTION_ARG_INT,	&rtpe_config.num_threads,	"Number of worker threads to create",	"INT"	},
 		{ "media-num-threads",  0, 0, G_OPTION_ARG_INT,	&rtpe_config.media_num_threads,	"Number of worker threads for media playback",	"INT"	},
+		{ "kernel-num-threads", 0, 0, G_OPTION_ARG_INT,	&rtpe_config.kernel_num_threads,"Number of worker threads for kernel RTP",	"INT"	},
 #ifdef WITH_TRANSCODING
 		{ "codec-num-threads",  0, 0, G_OPTION_ARG_INT,	&rtpe_config.codec_num_threads,	"Number of transcoding threads for asynchronous operation",	"INT"	},
 #endif
+		{ "kernel-slots", 0, 0,	G_OPTION_ARG_INT,	&rtpe_config.kernel_slots,	"Number of slots per kernel poller",	"INT"   },
 		{ "delete-delay",  'd', 0, G_OPTION_ARG_INT,    &delete_delay,  "Delay for deleting a session from memory.",    "INT"   },
 		{ "sip-source",  0,  0, G_OPTION_ARG_NONE,	&sip_source,	"Use SIP source address by default",	NULL	},
 		{ "dtls-passive", 0, 0, G_OPTION_ARG_NONE,	&dtls_passive_def,"Always prefer DTLS passive role",	NULL	},
@@ -785,6 +867,7 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		{ "recording-method",0, 0, G_OPTION_ARG_STRING,	&rtpe_config.rec_method,	"Strategy for call recording",		"pcap|proc|all"	},
 		{ "recording-format",0, 0, G_OPTION_ARG_STRING,	&rtpe_config.rec_format,	"File format for stored pcap files",	"raw|eth"	},
 		{ "record-egress",0, 0, G_OPTION_ARG_NONE,	&rtpe_config.rec_egress,	"Recording egress media instead of ingress",	NULL	},
+		{ "record-both",0, 0, G_OPTION_ARG_NONE,	&rtpe_config.rec_both,	"Record both ingress and egress media",	NULL	},
 #ifdef HAVE_LIBIPTC
 		{ "iptables-chain",0,0,	G_OPTION_ARG_STRING,	&rtpe_config.iptables_chain,"Add explicit firewall rules to this iptables chain","STRING" },
 #endif
@@ -793,7 +876,7 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		{ "priority",	0, 0,	G_OPTION_ARG_INT,	&rtpe_config.priority,	"Thread scheduling priority",	"INT" },
 		{ "idle-scheduling",0, 0,G_OPTION_ARG_STRING,	&rtpe_config.idle_scheduling,"Idle thread scheduling policy",	"default|none|fifo|rr|other|batch|idle" },
 		{ "idle-priority",0, 0,	G_OPTION_ARG_INT,	&rtpe_config.idle_priority,"Idle thread scheduling priority",	"INT" },
-		{ "log-srtp-keys",'F', 0, G_OPTION_ARG_NONE,	&rtpe_config.log_keys,	"Log SRTP keys to error log", NULL },
+		{ "log-srtp-keys",0, 0, G_OPTION_ARG_NONE,	&rtpe_config.log_keys,	"Log SRTP keys to error log", NULL },
 		{ "mysql-host",	0,   0,	G_OPTION_ARG_STRING,	&rtpe_config.mysql_host,"MySQL host for stored media files","HOST|IP"	},
 		{ "mysql-port",	0,   0,	G_OPTION_ARG_INT,	&rtpe_config.mysql_port,"MySQL port"				,"INT"		},
 		{ "mysql-user",	0,   0,	G_OPTION_ARG_STRING,	&rtpe_config.mysql_user,"MySQL connection credentials",		"USERNAME"	},
@@ -827,8 +910,8 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 #ifdef WITH_TRANSCODING
 		{ "dtx-delay",	0,0,	G_OPTION_ARG_INT,	&dtx_delay,		"Delay in milliseconds to trigger DTX handling","INT"},
 		{ "max-dtx",	0,0,	G_OPTION_ARG_INT,	&max_dtx,		"Maximum duration of DTX handling",	"INT"},
-		{ "dtx-buffer",	0,0,	G_OPTION_ARG_INT,	&rtpe_config.dtx_buffer,"Maxmium number of packets held in DTX buffer",	"INT"},
-		{ "dtx-lag",	0,0,	G_OPTION_ARG_INT,	&dtx_lag,		"Maxmium time span in milliseconds held in DTX buffer",	"INT"},
+		{ "dtx-buffer",	0,0,	G_OPTION_ARG_INT,	&rtpe_config.dtx_buffer,"Maximum number of packets held in DTX buffer",	"INT"},
+		{ "dtx-lag",	0,0,	G_OPTION_ARG_INT,	&dtx_lag,		"Maximum time span in milliseconds held in DTX buffer",	"INT"},
 		{ "dtx-shift",	0,0,	G_OPTION_ARG_INT,	&dtx_shift,		"Length of time (in ms) to shift DTX buffer after over/underflow",	"INT"},
 		{ "dtx-cn-params",0,0,	G_OPTION_ARG_STRING_ARRAY,&dtx_cn_params,	"Parameters for CN generated from DTX","INT INT INT ..."},
 		{ "amr-dtx", 0,0,	G_OPTION_ARG_STRING,	&amr_dtx,		"DTX mechanism to use for AMR and AMR-WB","native|CN"},
@@ -840,15 +923,15 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		{ "kernel-player-media",0,0,G_OPTION_ARG_INT,	&rtpe_config.kernel_player_media,"Max number of kernel media files","INT"},
 		{ "preload-media-files",0,0,G_OPTION_ARG_FILENAME_ARRAY,&rtpe_config.preload_media_files,"Preload media file(s) for playback into memory","FILE"},
 		{ "media-files-reload",0,0,G_OPTION_ARG_INT,	&rtpe_config.media_refresh,"Refresh/reload preloaded media files at a certain interval","SECONDS"},
-		{ "media-files-expire",0,0,G_OPTION_ARG_INT,	&media_expire,		"Maximum age of unused cached media files","SECONDS"},
+		{ "media-files-expire",0,0,G_OPTION_ARG_INT,	&media_files_expire,		"Maximum age of unused cached media files","SECONDS"},
 		{ "expiry-timer",0,0,G_OPTION_ARG_INT,		&rtpe_config.expiry_timer,"How often to check for expired media cache entries","SECONDS"},
 		{ "preload-db-media",0,0,G_OPTION_ARG_STRING_ARRAY,&rtpe_config.preload_db_media,"Preload media from database for playback into memory","INT"},
 		{ "db-media-reload",0,0,G_OPTION_ARG_INT,	&rtpe_config.db_refresh,"Reload preloaded media from DB at a certain interval","SECONDS"},
-		{ "db-media-expire",0,0,G_OPTION_ARG_INT,	&db_expire,		"Maximum age of unused cached DB media entries","SECONDS"},
+		{ "db-media-expire",0,0,G_OPTION_ARG_INT,	&db_media_expire,		"Maximum age of unused cached DB media entries","SECONDS"},
 		{ "db-media-cache",0,0,	G_OPTION_ARG_FILENAME,	&rtpe_config.db_media_cache,"Directory to store media loaded from database","PATH"},
 		{ "preload-db-cache",0,0,G_OPTION_ARG_STRING_ARRAY,&rtpe_config.preload_db_cache,"Preload media from database for playback into file cache","INT"},
 		{ "db-cache-reload",0,0,G_OPTION_ARG_INT,	&rtpe_config.cache_refresh,"Refresh/reload cached media from DB at a certain interval","SECONDS"},
-		{ "db-cache-expire",0,0,G_OPTION_ARG_INT,	&rtpe_config.cache_expire,"Maximum age of unused cached DB entries in files","SECONDS"},
+		{ "db-cache-expire",0,0,G_OPTION_ARG_INT,	&db_cache_expire,"Maximum age of unused cached DB entries in files","SECONDS"},
 		{ "audio-buffer-length",0,0,	G_OPTION_ARG_INT,&rtpe_config.audio_buffer_length,"Length in milliseconds of audio buffer","INT"},
 		{ "audio-buffer-delay",0,0,	G_OPTION_ARG_INT,&rtpe_config.audio_buffer_delay,"Initial delay in milliseconds for buffered audio","INT"},
 		{ "audio-player",0,0,	G_OPTION_ARG_STRING,	&use_audio_player,	"When to enable the internal audio player","on-demand|play-media|transcoding|always"},
@@ -873,15 +956,16 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 #endif
 		{ "mos",0,0,		G_OPTION_ARG_STRING_ARRAY,&mos_options,		"MOS calculation options",		"CQ|LQ"},
 		{ "measure-rtp",0,0,	G_OPTION_ARG_NONE,	&rtpe_config.measure_rtp,"Enable measuring RTP statistics and VoIP metrics",NULL},
+		{ "ssrc-reporting",0,0,	G_OPTION_ARG_STRING,	&ssrc_reporting,	"Format of SSRC stats returned by delete/query","full|inline|global|none"},
 #ifdef SO_INCOMING_CPU
 		{ "socket-cpu-affinity",0,0,G_OPTION_ARG_INT,	&rtpe_config.cpu_affinity,"CPU affinity for media sockets","INT"},
 #endif
 		{ "janus-secret", 0,0,	G_OPTION_ARG_STRING,	&rtpe_config.janus_secret,"Admin secret for Janus protocol","STRING"},
 		{ "rtcp-interval", 0,0,	G_OPTION_ARG_INT,	&rtcp_interval,		"Delay in milliseconds between RTCP packets when generate-rtcp flag is on, where random dispersion < 1 sec is added on top","INT"},
-		{ "moh-max-duration", 0,0,	G_OPTION_ARG_INT,	&rtpe_config.moh_max_duration, "Max possible duration (in milliseconds) that can be spent on playing a file. If set to 0 then will be ignored.", "INT"},
+		{ "moh-max-duration", 0,0,	G_OPTION_ARG_INT,	&rtpe_config.moh_max_duration, "Max possible duration (in milliseconds) that can be spent on playing a file. If set to 0 then will be ignored. If not set at all, will be set to 180s by default.", "INT"},
 		{ "moh-max-repeats", 0,0,	G_OPTION_ARG_INT,	&rtpe_config.moh_max_repeats, "Max possible amount of playback repeats for the music on hold. player-max-duration always takes a precedence over it.", "INT"},
 		{ "moh-attr-name", 0,0,	G_OPTION_ARG_STRING,	&rtpe_config.moh_attr_name, "Controls the value to be added to the session level of SDP whenever MoH is triggered.", "STRING"},
-		{ "moh-prevent-double-hold", 'F',0,	G_OPTION_ARG_NONE,	&rtpe_config.moh_prevent_double_hold, "Protects against double MoH played.", NULL},
+		{ "moh-prevent-double-hold", 0,0,	G_OPTION_ARG_NONE,	&rtpe_config.moh_prevent_double_hold, "Protects against double MoH played.", NULL},
 		{ "max-recv-iters", 0, 0, G_OPTION_ARG_INT,    &rtpe_config.max_recv_iters,  "Maximum continuous reading cycles in UDP poller loop.", "INT"},
 		{ "vsc-start-rec",0,0,	G_OPTION_ARG_STRING,	&rtpe_config.vsc_start_rec.s,"DTMF VSC to start recording.", "STRING"},
 		{ "vsc-stop-rec",0,0,	G_OPTION_ARG_STRING,	&rtpe_config.vsc_stop_rec.s,"DTMF VSC to stop recording.", "STRING"},
@@ -998,14 +1082,21 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 					});
 			exit(xv);
 		}
-		if (nftables_start)
+		if (nftables_start) {
+			g_free(nftables_shutdown(rtpe_config.nftables_chain, rtpe_config.nftables_base_chain,
+					(nftables_args) {
+						.table = rtpe_config.kernel_table,
+						.family = rtpe_config.nftables_family,
+					}));
 			err = nftables_setup(rtpe_config.nftables_chain, rtpe_config.nftables_base_chain,
 					(nftables_args) {
 						.table = rtpe_config.kernel_table,
 						.append = rtpe_config.nftables_append,
 						.family = rtpe_config.nftables_family,
 						.xtables = rtpe_config.xtables,
+						.may_exist = true,
 					});
+		}
 		else // nftables_stop
 			err = nftables_shutdown(rtpe_config.nftables_chain, rtpe_config.nftables_base_chain,
 					(nftables_args) {
@@ -1019,6 +1110,8 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 	}
 #endif
 
+	validate_global_rtp_port_range();
+
 	for (iter = if_a; iter && *iter; iter++) {
 		if (!if_addr_parse(&rtpe_config.interfaces, *iter, ifas))
 			die("Invalid interface specification: '%s'", *iter);
@@ -1030,6 +1123,9 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 			ic->port_min = rtpe_config.port_min;
 		if (!ic->port_max)
 			ic->port_max = rtpe_config.port_max;
+
+		validate_interface_rtp_port_range(ic);
+
 		t_queue_push_tail(&rtpe_config.interfaces, ic);
 	}
 
@@ -1122,8 +1218,10 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		die("Invalid max-recv-iters value");
 
 	/* if not set, define by default to half an hour */
-	if (rtpe_config.moh_max_duration <= 0)
+	if (rtpe_config.moh_max_duration < 0) {
+		ilog(LOG_DEBUG, "MoH max duration corrected to 180s.\n");
 		rtpe_config.moh_max_duration = 1800000;
+	}
 
 	rtpe_config.timeout_us = timeout * 1000000LL;
 	if (rtpe_config.timeout_us <= 0)
@@ -1145,12 +1243,16 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 	if (rtpe_config.delete_delay_us < 0)
 		die("Invalid negative delete-delay");
 
-	rtpe_config.media_expire_us = media_expire * 1000000LL;
-	if (rtpe_config.media_expire_us < 0)
+	rtpe_config.media_files_expire_us = media_files_expire * 1000000LL;
+	if (rtpe_config.media_files_expire_us < 0)
 		die("Invalid negative media-files-expire");
 
-	rtpe_config.db_expire_us = db_expire * 1000000LL;
-	if (rtpe_config.db_expire_us < 0)
+	rtpe_config.db_cache_expire_us = db_cache_expire * 1000000LL;
+	if (rtpe_config.db_cache_expire_us < 0)
+		die("Invalid negative db-cache-expire");
+
+	rtpe_config.db_media_expire_us = db_media_expire * 1000000LL;
+	if (rtpe_config.db_media_expire_us < 0)
 		die("Invalid negative db-media-expire");
 
 	rtpe_config.rtcp_interval_us = rtcp_interval * 1000LL;
@@ -1158,11 +1260,28 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		rtpe_config.rtcp_interval_us = 5000 * 1000LL;
 
 	rtpe_config.redis_disable_time_us = redis_disable_time * 1000000LL;
+	if (rtpe_config.redis_disable_time_us < 0)
+		die("Invalid negative redis-disable-time");
+
 	rtpe_config.mqtt_publish_interval_us = mqtt_publish_interval * 1000LL;
+	if (rtpe_config.mqtt_publish_interval_us < 0)
+		die("Invalid negative mqtt-publish-interval");
+
 	rtpe_config.dtx_lag_us = dtx_lag * 1000LL;
+	if (rtpe_config.dtx_lag_us < 0)
+		die("Invalid negative dtx-lag");
+
 	rtpe_config.dtx_delay_us = dtx_delay * 1000LL;
+	if (rtpe_config.dtx_delay_us < 0)
+		die("Invalid negative dtx-delay");
+
 	rtpe_config.dtx_shift_us = dtx_shift * 1000LL;
+	if (rtpe_config.dtx_shift_us < 0)
+		die("Invalid negative dtx-shift");
+
 	rtpe_config.max_dtx_us = max_dtx * 1000000LL;
+	if (rtpe_config.max_dtx_us < 0)
+		die("Invalid negative max-dtx");
 
 	if (redisps) {
 		if (redis_ep_parse(&rtpe_config.redis_ep, &rtpe_config.redis_db, &rtpe_config.redis_hostname,
@@ -1190,28 +1309,28 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 				die("Invalid Redis endpoint [IP:PORT/INT] '%s' (--redis-subscribe)", redisps_subscribe);
 		}
 
-	if (rtpe_config.fmt > 2)
+	if (rtpe_config.fmt < 0 || rtpe_config.fmt > 2)
 		die("Invalid XMLRPC format");
 
 	// XXX unify the log facility options
 	if (log_facility_cdr_s) {
 		if (!parse_log_facility(log_facility_cdr_s, &_log_facility_cdr)) {
 			print_available_log_facilities();
-			die ("Invalid log facility for CDR '%s' (--log-facility-cdr)", log_facility_cdr_s);
+			die("Invalid log facility for CDR '%s' (--log-facility-cdr)", log_facility_cdr_s);
 		}
 	}
 
 	if (log_facility_rtcp_s) {
 		if (!parse_log_facility(log_facility_rtcp_s, &_log_facility_rtcp)) {
 			print_available_log_facilities();
-			die ("Invalid log facility for RTCP '%s' (--log-facility-rtcp)n", log_facility_rtcp_s);
+			die("Invalid log facility for RTCP '%s' (--log-facility-rtcp)", log_facility_rtcp_s);
 		}
 	}
 
 	if (log_facility_dtmf_s) {
 		if (!parse_log_facility(log_facility_dtmf_s, &_log_facility_dtmf)) {
 			print_available_log_facilities();
-			die ("Invalid log facility for DTMF '%s' (--log-facility-dtmf)n", log_facility_dtmf_s);
+			die("Invalid log facility for DTMF '%s' (--log-facility-dtmf)", log_facility_dtmf_s);
 		}
 	}
 
@@ -1294,7 +1413,7 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 
 	if (rtpe_config.jb_length < 0)
 		die("Invalid negative jitter buffer size");
-	
+
 	// Validate adaptive jitter buffer parameters
 	if (rtpe_config.jb_adaptive) {
 		if (rtpe_config.jb_adaptive_min < 0)
@@ -1306,18 +1425,23 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 		if (rtpe_config.jb_adaptive_min > rtpe_config.jb_adaptive_max)
 			die("--jb-adaptive-min (%d) must be <= --jb-adaptive-max (%d)", 
 			    rtpe_config.jb_adaptive_min, rtpe_config.jb_adaptive_max);
-		
+
 		// Set reasonable defaults if not specified
 		if (rtpe_config.jb_adaptive_max == 0)
 			rtpe_config.jb_adaptive_max = 300; // Default max: 300ms
-		
-		ilog(LOG_INFO, "Adaptive jitter buffer enabled: min=%dms, max=%dms", 
+
+		ilog(LOG_INFO, "Adaptive jitter buffer enabled: min=%dms, max=%dms",
 		     rtpe_config.jb_adaptive_min, rtpe_config.jb_adaptive_max);
 	}
 
-	if (silence_detect > 0) {
+	if (silence_detect > 0 && silence_detect < 100) {
 		rtpe_config.silence_detect_double = silence_detect / 100.0;
-		rtpe_config.silence_detect_int = (int) ((silence_detect / 100.0) * UINT32_MAX);
+		rtpe_config.silence_detect_int = (uint32_t) ((silence_detect / 100.0) * UINT32_MAX);
+	}
+	else if (silence_detect != 0) {
+		/* all what's < 0 and > 100 */
+		ilog(LOG_WARN, "Invalid --silence-detect value given (%f), must be in range 1-100",
+				silence_detect);
 	}
 
 	parse_cn_payload(&rtpe_config.cn_payload, cn_payload, "\x20", "cn-payload");
@@ -1424,6 +1548,19 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 			die("Invalid --control-pmtu option ('%s')", control_pmtu);
 	}
 
+	if (ssrc_reporting) {
+		if (!strcasecmp(ssrc_reporting, "full"))
+			rtpe_config.ssrc_reporting = SRP_FULL;
+		else if (!strcasecmp(ssrc_reporting, "inline"))
+			rtpe_config.ssrc_reporting = SRP_INLINE;
+		else if (!strcasecmp(ssrc_reporting, "global"))
+			rtpe_config.ssrc_reporting = SRP_GLOBAL;
+		else if (!strcasecmp(ssrc_reporting, "none"))
+			rtpe_config.ssrc_reporting = SRP_NONE;
+		else
+			die("Invalid --ssrc-reporting option ('%s')", ssrc_reporting);
+	}
+
 #define STR_LEN_INIT(x) if (rtpe_config.x.s) rtpe_config.x.len = strlen(rtpe_config.x.s)
 	STR_LEN_INIT(vsc_start_rec);
 	STR_LEN_INIT(vsc_stop_rec);
@@ -1491,6 +1628,14 @@ RTPE_CONFIG_ENUM_PARAMS
 
 #define X(s) ini_rtpe_cfg->s = g_strdup(rtpe_config.s);
 RTPE_CONFIG_CHARP_PARAMS
+#undef X
+
+#define X(s) ini_rtpe_cfg->s = g_strdupv(rtpe_config.s);
+RTPE_CONFIG_CHARPP_PARAMS
+#undef X
+
+#define X(s) ini_rtpe_cfg->s = str_dup_str(&rtpe_config.s);
+RTPE_CONFIG_STR_PARAMS
 #undef X
 
 	memcpy(&ini_rtpe_cfg->common.log_levels, &rtpe_config.common.log_levels, sizeof(ini_rtpe_cfg->common.log_levels));
@@ -1569,6 +1714,7 @@ static void early_init(void) {
 static void clib_init(void) {
 	media_bufferpool = bufferpool_new(bufferpool_aligned_alloc, bufferpool_aligned_free);
 	uring_thread_init();
+	kernel_thread_init();
 }
 static void clib_cleanup(void) {
 	bufferpool_destroy(media_bufferpool);
@@ -1582,8 +1728,27 @@ static void clib_loop(void) {
 
 static void kernel_setup(void) {
 	g_autoptr(char) err = NULL;
+
 	if (rtpe_config.kernel_table < 0)
 		goto fallback;
+
+#ifndef WITHOUT_NFTABLES
+	// ignore errors
+	g_free(nftables_shutdown(rtpe_config.nftables_chain, rtpe_config.nftables_base_chain,
+			(nftables_args) {
+				.table = rtpe_config.kernel_table,
+				.family = rtpe_config.nftables_family,
+			}));
+#endif
+
+	if (!kernel_delete_table(rtpe_config.kernel_table) && errno != ENOENT) {
+		ilog(LOG_ERR, "FAILED TO DELETE KERNEL TABLE %i (%s), KERNEL FORWARDING DISABLED",
+				rtpe_config.kernel_table, strerror(errno));
+		if (rtpe_config.no_fallback)
+			die("Userspace fallback disallowed - exiting");
+		goto fallback;
+	}
+
 #ifndef WITHOUT_NFTABLES
 	err = nftables_setup(rtpe_config.nftables_chain, rtpe_config.nftables_base_chain,
 			(nftables_args) {.table = rtpe_config.kernel_table,
@@ -1597,6 +1762,17 @@ static void kernel_setup(void) {
 				"%s", err);
 	}
 #endif
+
+	if (rtpe_config.xtables) {
+		if (!kernel_create_table(rtpe_config.kernel_table)) {
+			ilog(LOG_ERR, "FAILED TO CREATE KERNEL TABLE %i (%s), KERNEL FORWARDING DISABLED",
+					rtpe_config.kernel_table, strerror(errno));
+			if (rtpe_config.no_fallback)
+				die("Userspace fallback disallowed - exiting");
+			goto fallback;
+		}
+	}
+
 	if (!kernel_setup_table(rtpe_config.kernel_table)) {
 		if (rtpe_config.no_fallback)
 			die("Userspace fallback disallowed - exiting");
@@ -1608,10 +1784,22 @@ static void kernel_setup(void) {
 		       die("Failed to initialise kernel media player");
 	}
 
+	unsigned int num_senders = rtpe_config.kernel_num_threads < 0
+		? rtpe_config.num_threads : rtpe_config.kernel_num_threads;
+
+	if (rtpe_config.kernel_slots <= 0)
+		num_senders = 0;
+
+	rtpe_config.kernel_num_threads = num_senders;
+
+	kernel_init_pollers(num_senders);
+
 	return;
 
 fallback:
-	shm_bufferpool = bufferpool_new(bufferpool_aligned_alloc, bufferpool_aligned_free); // fallback userspace bufferpool
+	// fallback userspace bufferpool
+	shm_bufferpool = bufferpool_new(bufferpool_aligned_alloc, bufferpool_aligned_free);
+	static_bufferpool = bufferpool_new(bufferpool_aligned_alloc, bufferpool_aligned_free);
 }
 
 
@@ -1639,7 +1827,7 @@ static void init_everything(charp_ht templates) {
 	iptables_init();
 	control_ng_init();
 	if (call_interfaces_init(templates))
-		abort();
+		die("Interfaces initialization fatal error");
 	statistics_init();
 #ifdef WITH_TRANSCODING
 	codeclib_thread_init = clib_init;
@@ -1653,7 +1841,7 @@ static void init_everything(charp_ht templates) {
 	jitter_buffer_init();
 	t38_init();
 	if (rtpe_config.mqtt_host && mqtt_init())
-		abort();
+		die("Mosquitto client initialization fatal error");
 	codecs_init();
 	janus_init();
 	if (!kernel_init_table())
@@ -1700,7 +1888,7 @@ static void create_everything(void) {
 	rtpe_poller_threads = g_new0(struct poller_thread, num_poller_threads);
 
 	if (call_init())
-		abort();
+		die("rtpe_callhash initialization fatal error");
 
         rwlock_init(&rtpe_config.keyspaces_lock);
 
@@ -1736,7 +1924,7 @@ static void create_everything(void) {
 		if (!rtpe_redis_notify)
 			die("Cannot start up without running Redis %s subscribe database! See also NO_REDIS_REQUIRED parameter.",
 				endpoint_print_buf(&rtpe_config.redis_subscribe_ep));
-		// subscribed-kespaces takes precedence over db in notify ep
+		// subscribed-keyspaces takes precedence over db in notify ep
 		if (!rtpe_config.redis_subscribed_keyspaces.length) {
 			g_queue_push_tail(&rtpe_config.redis_subscribed_keyspaces, GINT_TO_POINTER(rtpe_config.redis_subscribe_db));
 		}
@@ -1963,6 +2151,16 @@ int main(int argc, char **argv) {
 				idx < rtpe_config.num_threads ? "poller" : "cpoller");
 	}
 
+
+	if (kernel.is_open && rtpe_config.kernel_num_threads > 0 && rtpe_config.kernel_slots > 0) {
+		for (unsigned int idx = 0; idx < rtpe_config.kernel_num_threads; ++idx)
+			thread_create_detach_prio(
+					kernel_poller_loop,
+					GUINT_TO_POINTER(idx),
+					rtpe_config.scheduling, rtpe_config.priority,
+					"kpoller");
+	}
+
 	media_player_launch();
 	send_timer_launch();
 	jitter_buffer_launch();
@@ -1999,11 +2197,11 @@ int main(int argc, char **argv) {
 
 	ilog(LOG_INFO, "Version %s shutting down", RTPENGINE_VERSION);
 
-	recording_fs_free();
-
 	unfill_initial_rtpe_cfg(&initial_rtpe_config);
 
 	call_free();
+
+	recording_fs_free();
 
 	jitter_buffer_init_free();
 	media_player_free();
@@ -2014,6 +2212,7 @@ int main(int argc, char **argv) {
 	codecs_cleanup();
 	statistics_free();
 	codeclib_free();
+	kernel_cleanup_pollers();
 
 	redis_close(rtpe_redis);
 	if (rtpe_redis_write != rtpe_redis)
@@ -2046,6 +2245,7 @@ int main(int argc, char **argv) {
 #endif
 	ng_client_cleanup();
 	bufferpool_destroy(shm_bufferpool);
+	bufferpool_destroy(static_bufferpool);
 	kernel_shutdown_table();
 	options_free();
 	bufferpool_cleanup();

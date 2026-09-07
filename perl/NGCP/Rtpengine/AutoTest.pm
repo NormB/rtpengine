@@ -23,9 +23,10 @@ our $port;
 BEGIN {
 	require Exporter;
 	@ISA = qw(Exporter);
-	our @EXPORT = qw(autotest_start new_call new_call_nc offer answer ft tt cid snd srtp_snd rtp rcv srtp_rcv rcv_no rcv_maybe
+	our @EXPORT = qw(autotest_start new_call new_call_nc offer answer ft tt cid snd snd_no srtp_snd rtp rcv srtp_rcv rcv_no rcv_maybe
 		srtp_dec escape rtpm rtpmre reverse_tags new_ft new_tt crlf sdp_split rtpe_req offer_answer
-		autotest_init subscribe_request subscribe_answer publish use_json rtpe_raw_req);
+		autotest_init subscribe_request subscribe_answer publish create create_answer
+		use_json rtpe_raw_req);
 };
 
 
@@ -77,7 +78,7 @@ sub autotest_init {
 		Time::HiRes::usleep(100000); # 100 ms x 300 = 30 sec
 
 		$tag_iter = 0;
-		$tag_suffix = '-' . rand();
+		$tag_suffix = '-' . $0 . '-' . rand();
 
 		my $ok = 0;
 		eval {
@@ -202,14 +203,29 @@ sub subscribe_request {
 sub subscribe_answer {
 	my ($name, $req, $sdp) = @_;
 	$req->{sdp} = $sdp;
-	my $resp = rtpe_req('subscribe answer', $name, $req);
+	return rtpe_req('subscribe answer', $name, $req);
 }
 sub publish {
 	return offer_answer('publish', @_);
 }
+sub create {
+	my ($name, $req, $sdp_exp) = @_;
+	my $resp = rtpe_req('create', $name, $req);
+	my @matches = sdp_match('create', $name, $resp->{sdp}, $sdp_exp);
+	return ($resp->{'call-id'}, $resp->{'from-tag'}, @matches);
+}
+sub create_answer {
+	my ($name, $req, $sdp) = @_;
+	$req->{sdp} = $sdp;
+	return rtpe_req('create answer', $name, $req);
+}
 sub snd {
 	my ($sock, $dest, $packet, $addr) = @_;
 	$sock->send($packet, 0, pack_sockaddr_in($dest, inet_aton($addr // '203.0.113.1'))) or die;
+}
+sub snd_no {
+	my ($sock, $dest, $packet, $addr) = @_;
+	ok(!$sock->send($packet, 0, pack_sockaddr_in($dest, inet_aton($addr // '203.0.113.1'))), "send to closed port fails");
 }
 sub srtp_snd {
 	my ($sock, $dest, $packet, $srtp_ctx, $addr) = @_;
@@ -257,6 +273,7 @@ sub rtp {
 }
 sub rcv {
 	my ($sock, $port, $match, $cb, $cb_arg) = @_;
+	my @caller = caller;
 	my $p = '';
 	local $SIG{ALRM} = sub { die("recv timed out"); };
 	alarm(1);
@@ -273,7 +290,7 @@ sub rcv {
 		print("rtp recv $pt $seq $ts $ssrc " . unpack('H*', $payload) . "\n");
 		print(unpack('H*', $p) . "\n");
 	}
-	like $p, $match, 'received packet matches';
+	like $p, $match, "received packet matches (@caller)";
 	my @matches = $p =~ $match;
 	for my $m (@matches) {
 		if (defined($m) && length($m) == 2) {
@@ -296,7 +313,7 @@ sub rcv {
 		die;
 	}
 	if ($port != -1) {
-		is($port, $rport, "receive port matches");
+		is($port, $rport, "receive port matches (@caller)");
 	}
 	elsif ($port == -1 && @matches) {
 		unshift(@matches, $rport, $raddr);
@@ -305,10 +322,11 @@ sub rcv {
 }
 sub rcv_no {
 	my ($sock) = @_;
+	my @caller = caller;
 	Time::HiRes::sleep(0.1);
 	my $p = '';
 	my $addr = $sock->recv($p, 65535, &MSG_DONTWAIT);
-	ok(! defined $addr, "no packet received");
+	ok(! defined $addr, "no packet received (@caller)");
 }
 sub rcv_maybe {
 	my ($sock) = @_;
@@ -396,21 +414,31 @@ sub use_json {
 	$c->{json} = $bool;
 }
 
+sub shut_rtpe {
+	my ($cb) = @_;
+
+	return unless $rtpe_pid;
+
+	kill('INT', $rtpe_pid) or terminate("cannot interrupt rtpe");
+
+	$cb and $cb->();
+
+	# wait for daemon to terminate
+	my $status = -1;
+	for (1 .. 50) {
+		$status = waitpid($rtpe_pid, WNOHANG);
+		last if $status != 0;
+		Time::HiRes::usleep(100000); # 100 ms x 50 = 5 sec
+	}
+	kill('KILL', $rtpe_pid) if $status == 0;
+	$status == $rtpe_pid or terminate("cannot wait for process $rtpe_pid: $status: $!");
+	$? == 0 or terminate("process exited with $?");
+
+	undef $rtpe_pid;
+}
 
 END {
-	if ($rtpe_pid) {
-		kill('INT', $rtpe_pid) or terminate("cannot interrupt rtpe");
-		# wait for daemon to terminate
-		my $status = -1;
-		for (1 .. 50) {
-			$status = waitpid($rtpe_pid, WNOHANG);
-			last if $status != 0;
-			Time::HiRes::usleep(100000); # 100 ms x 50 = 5 sec
-		}
-		kill('KILL', $rtpe_pid) if $status == 0;
-		$status == $rtpe_pid or terminate("cannot wait for process $rtpe_pid: $status: $!");
-		$? == 0 or terminate("process exited with $?");
-	}
+	shut_rtpe();
 }
 
 

@@ -1,3 +1,558 @@
+ngcp-rtpengine (26.3.0.0+0~mr26.3.0.0) unstable; urgency=medium
+
+  [ Richard Fuchs ]
+  * [c2038e0] MT#55283 improve no-transcoding build profile
+  * [71cceee] MT#55283 more leniency for rejected streams
+  * [3fdc11d] MT#55283 remove unused function
+  * [20f31e0] MT#55283 allow alternative encodings
+  * [372a325] MT#55283 fix old test case
+  * [9dc9859] MT#55283 add CN tests to extended test suite
+  * [dfcb9a8] MT#55283 fix ffmpeg CNG usage
+  * [e89fddb] MT#55283 tests for I0ebe0b7a9ad
+  * [183aaae] MT#55283 store original call ID in monologue
+  * [1f1327d] MT#55283 add call_id to arguments to call_delete
+  * [df49ba0] MT#55283 split out call_delete_full
+  * [300b4be] MT#55283 split out call_delete_monologue
+  * [6391c6b] MT#65392 add "fast" flag for delete processing
+  * [32b8063] MT#55283 split out call_do_delete_full
+  * [e61f5c8] MT#55283 support call-ID-specific delete
+  * [ccdd539] MT#65392 add ssrc-reporting config option
+  * [51bfb4e] MT#55283 tests for Ic33e97451f
+  * [4551c7a] MT#55283 protect against NULL ssrc_in
+  * [92b0b11] MT#65413 move codec defs into separate files
+  * [701d76f] MT#65413 update dependencies
+  * [01d3332] MT#65413 split out cchain stuff
+  * [063efc6] MT#65388 support passthrough + transcoding
+  * [dc8a0ee] MT#55283 annotate nonull args
+  * [2106ea4] MT#55283 update docs
+  * [36a347e] MT#55283 fix compilation for kernel >= 7.1
+  * [c53e7f9] MT#55283 add missing build flags to preload libs
+  * [4751218] MT#55283 move setting of RECEIVED flag
+  * [99984c9] MT#55283 add ICE priority to logs
+  * [5ad3605] MT#55283 debug log output for EINVAL
+  * [7c5dbd1] MT#55283 remove goto target
+  * [dbcd657] MT#55283 early return for no-support case
+  * [7ab5cf3] MT#55283 further defuse error log
+  * [46e8d6c] MT#55283 set kernelized+no support flag
+  * [209e5a3] MT#55283 kernel in/out even in drop case
+  * [ab8b7fb] MT#55283 unconditionally clear no-support flag
+  * [36bba3f] MT#55283 fix compiler warning
+  * [9cb9023] MT#55283 add extra null checks
+  * [d3af013] MT#55283 altered endpoint learning with ICE
+  * [0393d84] MT#55283 tests for Ieac289335
+  * [69e85fa] MT#55283 init kernel senders early
+  * [114b5ce] MT#55283 init kernel senders in all threads
+  * [c4603dc] MT#55283 ensure null termination
+  * [16de968] MT#55283 add missing socket reset flag
+  * [22c8df9] MT#55283 store ref to table in private_data
+  * [7641a94] MT#55283 store table ref in list seq file
+  * [d02b41d] MT#55283 store table ref in re_play_stream
+  * [1f6d081] MT#55283 store table ref in re_play_stream_packets
+  * [16f5a4d] MT#55283 store table ref in call obj
+  * [03c37c8] MT#55283 change "del" strategy
+  * [70ce495] MT#55283 pull up call to get_table
+  * [d7c97c8] MT#55283 extend nfapi_add_binary_str_attr
+  * [c81f9df] MT#55283 more verbose nftables comment
+  * [1b8e868] MT#55283 store reference to table in expr
+  * [32874b6] MT#55283 split up startup-shutdown
+  * [eebbece] MT#55283 support table creation through nft
+  * [237de5c] MT#55283 remove obsolete PID field
+  * [7590a47] MT#55283 free allocated strings
+  * [e7b50ca] MT#55283 remove unused variables
+  * [8e65f01] MT#55283 fix legacy xt check
+  * [ef39a3e] MT#55283 fix compiler warnings
+  * [e6c9330] MT#55283 fix compilation for RHEL 9
+  * [712373d] MT#55283 comment obsoleted by 71cceeed5a
+  * [f86faf6] MT#55283 unify skb_pull to transport
+  * [60c2a1f] MT#55283 fix array size
+  * [9c79476] MT#55283 support shutdown callback
+  * [78ee045] MT#55283 ignore incorrect use of DTLS=passive
+  * [b0eafb2] MT#55283 pull skb_copy into main func
+  * [81572a7] MT#55283 pull down skb_copy past get_target
+  * [718bee6] MT#55283 add open counter
+  * [4ca8bb0] MT#55283 refactor into rtpe_pull_trim
+  * [5f5a1e2] MT#55283 move functions
+  * [943f897] MT#55283 add early DTLS tests
+  * [32784ae] MT#55283 pull skb_copy_expand past demux
+  * [1d6b4da] MT#55283 use data+len instead of skb as arguments
+  * [d1f5834] MT#55283 add rtpe_skb_cpy helper function
+  * [213a356] MT#55283 pull skb_copy past RTP/RTCP parsing
+  * [6302ca0] MT#55283 obsolete error_nf_action
+  * [6e68c9e] MT#55283 consolidate code paths
+  * [df8cb30] MT#55283 change return type
+  * [8dd97e2] MT#55283 make skb copies on demand
+  * [c8d014c] MT#55283 add zero-copy stats
+  * [793fdf7] MT#55283 add snprintf wrapper
+  * [bba144c] MT#65481 extend preload ctor
+  * [a4746a9] MT#65481 add open/read/write mockups
+  * [30775b5] MT#55283 add kernel API test
+  * [5a42837] MT#65570 convert ICE= to list
+  * [1a91c53] MT#65570 allow ICE-lite options in ICE= list
+  * [be90f1b] MT#65570 allow trickle option in ICE= list
+  * [64d82a1] MT#65570 obsolete stream-level ICE flag
+  * [0a21d78] MT#65570 support ICE2 SDP option
+  * [8a62497] MT#65570 support ICE2 flag
+  * [71da9f8] MT#65570 document new ICE options
+  * [8c2c535] MT#55283 move required function
+  * [abe9a37] MT#55283 remove unneeded indirection
+  * [26fee26] MT#55283 don't evict objects still in use
+  * [5daae51] MT#55283 add missing iters increment
+  * [3df016e] MT#55283 add missing CPPFLAGS_DEFAULT
+  * [5c88971] MT#55283 don't pop entries that shouldn't be
+  * [6e3bb70] MT#55283 sequencer unit test
+  * [f417531] MT#55283 add missing dep
+  * [ae8d2fd] MT#55283 better optimise str_eq
+  * [f8ee3c1] MT#55283 fix compiler warning
+  * [83b05e9] MT#55283 update test for .reduce method
+  * [7b3ac41] MT#65413 split out AVC code
+  * [29be0f9] MT#55283 rework sequencer
+
+  [ Donat Zenichev ]
+  * [054a3b2] MT#61856 media_socket: reset `active_read_events`
+  * [294b814] MT#61856 media_socket: remove unused func
+  * [2bd4f4d] MT#61856 media_socket: init fd to -1 when binding socket
+  * [a4875c3] MT#61856 media_socket: make `release_reserved_port()` non-fragile
+  * [a51332f] MT#61856 media_socket: `extmap_short_is_valid_data()` no 0 len
+  * [3cf8a12] MT#61856 media_socket: don't exhaust stack
+  * [da59592] MT#61856 media_socket: make the log more precise
+  * [4e26009] MT#61856 media_socket: remove duplicate includes
+  * [d0c224b] MT#61856 media_socket: add guard for child media extmap
+  * [3662e25] MT#61856 media_socket: bundled RTP handling, guard for `ssrc_in`
+  * [be70cb4] MT#61856 recording: `vappend_meta_chunk_iov()` hardening
+  * [f84bbe5] MT#61856 recording: `setup_stream_proc()` hardening
+  * [2b2b30b] MT#61856 recording: use `append_meta_chunk()` macro
+  * [7970be9] MT#61856 recording: check recorded call registered in kernel
+  * [f1a35b9] MT#61856 recording: local cleanup hardening
+  * [707d16e] MT#61856 recording: destroy mutex when closing file
+  * [19dfbe9] MT#61856 recording: clear recording path on failure
+  * [05817ba] MT#55283 call: add a socket family guard
+  * [e16a230] MT#55283 media_socket: lock sink earlier when kernelizing
+
+  [ Alexander Bakker ]
+  * [4737152] MT#55283 Set valid decrypt fields for non-forwarding kernel targets
+  * [e6469c0] MT#55283 Defuse kernelize error for SRTP encryption not yet negotiated
+  * [250df2a] MT#55283 Unref ports after re-subscribe
+  * [702ccec] MT#55283 Treat missing a=fmtp as defaults for AMR
+
+  [ ilyassrhejjou ]
+  * [f04d3b1] MT#55283 feat: add --record-both option for simultaneous media recording
+
+  [ Idan Freiberg ]
+  * [7051631] MT#55283 kernel-module: scrub forwarded skb metadata
+
+  [ Gustavo Almeida ]
+  * [f99cffb] MT#55283 fix: add guard to avoid packet sent on shutdown on already dead streams
+
+  [ Guillem Jover ]
+  * [de58054] MT#55283 Fix typos
+  * [f8e4dd5] MT#55283 Add Description keys to systemd service files
+  * [2843277] MT#55283 Bump copyright year
+  * [9b74a7f] MT#55283 Call gzip with -n for reproducible output
+  * [b688988] MT#55283 kernel-module: Use do_div() instead of 64-bit division operator
+
+  [ Ashwin ]
+  * [c2a410d] MT#55283 docs: add HTTP API request examples
+  * [42ded6a] MT#55283 Mirror generate-RTCP Sender Reports to Homer (fixes #1684)
+
+ -- Sipwise Jenkins Builder <jenkins@sipwise.com>  Tue, 11 Aug 2026 14:21:57 +0200
+
+ngcp-rtpengine (26.2.0.0+0~mr26.2.0.0) unstable; urgency=medium
+
+  [ Richard Fuchs ]
+  * [88e145a] MT#55283 rename variables for clarity
+  * [b1f3147] MT#55283 rename global variable
+  * [679eaac] MT#55283 move type declaration
+  * [a75430f] MT#55283 add "self" container alias
+  * [d2a42a2] MT#55283 globalise check_codec_list
+  * [6231f85] MT#55283 rename variables for clarity
+  * [6984556] MT#55283 move audio player activation
+  * [28ac65b] MT#55283 add new "implicit" audio player flag
+  * [5b034e5] MT#55283 support passing down codec information
+  * [19c3a17] MT#55283 support early-media for create-answer
+  * [eedf08a] MT#55283 test for Ic8ed944df
+  * [3a31f3d] MT#55283 fix possible deadlock
+  * [ed933ba] MT#55283 remove logically dead code
+  * [47ecbdb] MT#55283 fix possible UAF
+  * [826da14] MT#55283 update all subs after sub-ans
+  * [af991ee] MT#55283 new "mix" flag
+  * [8565eb6] MT#55283 tests for I4d1dfa2a385
+  * [10fa284] MT#55283 only use audio player if there is a codec
+  * [40a98c5] MT#55283 stricter asymmetric codecs
+  * [af105c6] MT#55283 tests for Ibb9c1f7909
+  * [d2b99ac] MT#55283 reset memory arena after call merge
+  * [c70c8b4] MT#55283 move flags processing to new file
+  * [cf38ee0] MT#55283 change obj_release to inline
+  * [88f0483] MT#55283 revamp calls_merge once again
+  * [11b0276] MT#55283 add flags to helper script
+  * [f40bd16] MT#55283 add some alternative spellings
+  * [1fc0f1d] MT#55283 move cleanup functions
+  * [235c47a] MT#55283 reorder case labels
+  * [b2554a0] MT#55283 move inject flags into struct
+  * [f7b5a4d] MT#55283 update signature of dict_get_str
+  * [b91f582] MT#55283 allow list iteration to return errors
+  * [24bf817] MT#55283 allow returning error from list_iter
+  * [7058e2a] MT#55283 dict_iter can return error message
+  * [45be1f5] MT#55283 honour errors returns from parse
+  * [f5e1010] MT#55283 move type definition
+  * [d484f81] MT#55283 global namespacing for some funcs
+  * [3b27538] MT#55283 split up dialogue_connect
+  * [e2d06de] MT#55283 support sendrecv subscribe req
+  * [4bf3644] MT#55283 add mesh method
+  * [99e4904] MT#55283 fill RTCP endpoint even if same
+  * [1c4bf00] MT#55283 rework test for implicit mux
+  * [2e7ff00] MT#55283 don't check files that don't exist
+  * [c200aa4] MT#64939 also disable VERIFYHOST
+  * [4326969] MT#55283 update embedded DB schema
+  * [ab6a588] MT#64939 rework SQL connection into struct/object
+  * [39b3f2a] MT#64939 untangle stmt pointer from connection
+  * [771d24b] MT#64939 use object pool for SQL conns
+  * [bac85c7] MT#64939 add S3/GCS storage info to DB
+  * [fba001c] MT#55283 prevent SSRC deadlock
+  * [02ce7f8] MT#55283 add missing flag
+  * [f2d57de] MT#55283 defuse error message
+  * [2a4e3de] MT#55283 move check for destinations
+  * [c59b427] MT#55283 respond to JSON with JSON
+  * [38d0f15] MT#55283 extend search for compatible codec
+  * [3d07288] MT#55283 test for Ib1b9e08e65f
+  * [a5edfed] MT#55283 annotate function
+  * [175f1df] MT#55283 remove stray log message
+  * [cad798c] MT#55283 fix rebase fail
+  * [504cfe9] MT#55283 fix test case
+  * [154f2b8] MT#55283 fix random seq under DTX
+  * [e3464b9] MT#55283 tests for Iecdd3d28
+  * [6af4614] MT#55283 switch publish to update_init_subscribers
+  * [ac1ddcc] MT#55283 audio player only for "send" streams
+  * [be45af8] MT#55283 support audio player for "publish"
+  * [c016e3c] MT#55283 enable audio player after answer
+  * [33e242b] MT#55283 support blob64
+  * [96b8124] MT#55283 refactor media_player_find_file_begin
+  * [ccf60cf] MT#55283 try harder to determine audio format
+  * [dc22238] MT#55283 add resampling stage to audio player
+  * [7d942fe] MT#55283 drop NULL allowance
+  * [2c6b9a5] MT#55283 improve skew calculation
+  * [b073810] MT#55283 extend packetizer input
+  * [a3cf8ae] MT#55283 add G.726 codec type
+  * [fe09e74] MT#55283 support alternative key name
+  * [1a832a8] MT#55283 fix possible null pointer
+  * [833d48e] MT#55283 remove tests broken by Ia1d0cb8522a
+  * [6ed2e23] MT#55283 fix __unsubscribe_all_from_media
+  * [0faa777] MT#55283 add bufferpool stats output
+  * [4103df7] Revert "MT#55283 drop NULL allowance"
+  * [d4e11d6] MT#55283 prevent possible NULL dereference
+  * [eb10870] MT#55283 ignore ICE=force for answer SDPs
+  * [92ae6a2] MT#55283 add warning for mutually exclusive option
+  * [23299af] MT#55283 add static_bufferpool
+  * [efd96fd] MT#55283 don't free codec_opts
+  * [2e439c9] MT#55283 kfree doesn't need a null check
+  * [42cd2e0] MT#55283 dynamically allocate shm map
+  * [b725d4a] MT#55283 slightly defuse some tests
+  * [c70f493] MT#55283 fix non-tc builds
+  * [a190d56] MT#55283 save TOS in socket struct
+  * [707d02d] MT#55283 move stream_fd into shm
+  * [5403ed6] MT#55283 add ring buffers
+  * [b1c20ee] MT#55283 don't write to null
+  * [7f46579] MT#55283 add missing lock in JB
+  * [18625c7] MT#55283 move structs out of #ifdef scope
+  * [a37e544] MT#55283 remove temporary workaround
+  * [8e6b6fe] MT#55283 move shared build flags into shared file
+  * [0a932ff] MT#55283 store shared log levels in shared file
+  * [c05ba00] MT#55283 clean up logging system
+  * [4cf920c] MT#55283 enable separate compilation of lib/*
+  * [d9b72e0] MT#55283 eliminate duplicate compilation of .S
+  * [8a904fe] MT#55283 eliminate CUSTOM_POLLER
+  * [b066877] MT#55283 eliminate duplicate compilation of l/*c
+  * [d8d32bb] MT#55283 silence compiler warning
+  * [27a2d68] MT#55283 reformat makefiles
+  * [61dbd3c] MT#55283 eliminate duplicate compilation of daemon
+  * [887e8bc] MT#55283 rename build test results from .h
+  * [0e5f2d3] MT#55283 prevent overflow of async queue
+  * [fd0d1c2] MT#55283 add call ID logging for create/publish
+  * [fd057cc] MT#55283 remove unused DEL_STREAM
+  * [ceb7996] MT#55283 refcount ICE stream_fds
+  * [31375ca] MT#55283 fix bencode buffer alignment
+  * [421868d] MT#55283 remove unused flag from metafile
+  * [8172b83] MT#55283 protect against invalid metadata
+  * [5df7cab] MT#55283 update replay helper script
+  * [0c0e609] MT#55283 fix call ID alias logic after merge
+  * [7403746] MT#55283 demo scripts/lib
+  * [d804264] MT#55283 pysip-lite packaging
+  * [c89aa44] MT#55283 rename build profiles in backports
+  * [dd4c127] Revert "MT#55283 rename build profiles in backports"
+  * [7b41827] MT#55283 allow for non-ngcp named build profiles
+  * [71ced3c] MT#55283 remove unused methods
+  * [0449d0d] MT#55283 defuse MoH tests by default
+  * [db05dfe] MT#55283 fix silence detection typo/bug
+  * [a8aa5fc] MT#55283 remove focal backports script
+  * [f46a81d] MT#55283 rename python package for backports
+  * [154f4bf] MT#55283 iterate correct list
+  * [076e225] MT#55283 update to new CC ABI
+
+  [ Federico Cabiddu ]
+  * [6b02c02] MT#55283 kernel-module: clear skb->mark before forwarding to fix Cilium routing
+  * [ee99d86] MT#55283 kernel-module: zero queue_mapping before forwarding to fix Cilium throttle drop
+  * [8aa1708] MT#55283 kernel-module: zero skb->tstamp before forwarding to fix fq horizon drop
+
+  [ Orgad Shaneh ]
+  * [3d735cd] MT#55283 Build: Remove unused packages in docker build
+  * [071f318] MT#55283 CI: Build also arm64 debian packages
+  * [868cafb] MT#55283 Fix deb build
+  * [b87ae58] MT#55283 preserve supplemental codecs in publish mode
+  * [4be228b] MT#55283 support 'all' codec accept mode
+
+  [ Sergey Safarov ]
+  * [8b55ce8] MT#55283 el: removed RHEL-6 init scripts
+  * [bbcabbf] MT#55283 el: use rpm macros to create users, tmpfiles
+
+  [ Donat Zenichev ]
+  * [7102c97] MT#55283 rtpp flags parsing, use the semi-colon once
+  * [84d844d] MT#61856 sdp.c: remove duplicate include of call.h
+  * [2d4fcf2] MT#61856 sdp.c: fix some code comments typos
+  * [50daf6f] MT#61856 sdp.c: use a proper type for port append
+  * [dc2fdfb] MT#61856 media_socket: use INLINE shortening
+  * [8c518d0] MT#61856 sdp.c: properly clean stream params
+  * [f41feae] MT#61856 sdp.c: `sdp_out_add_media_connection()` add assert
+  * [2b8b628] MT#61856 sdp.c: manipulations (add) check if `a=` given
+  * [1d9b45c] MT#61856 sdp.c: `sdp_attr_dup()` fully copy strs
+  * [86c77a4] MT#61856 sdp.c: use the `UINT_MAX` explicitly
+  * [3cd93d4] MT#61856 call.c: correction for `unsubscribe_all_from_monologue()`
+  * [fb6d650] MT#61856 monologue_publish: check output of `monologue_open_ports()`
+  * [2d714cb] MT#61856 monologue_subscribe_request: check output of `monologue_open_ports()`
+  * [b1b6e63] MT#61856 monologue_call_create_media: check output of `monologue_open_ports()`
+  * [d86f51a] MT#61856 monologue_publish: refactor the func for ports
+  * [9bb0a7a] MT#61856 `monologue_call_create_answer()` returns bool
+  * [4303e19] MT#61856 check PS before cleaning in `__streams_set_sinks()`
+  * [88f13a6] MT#61856 make `call_timer_delete_monologues()` return void
+  * [3730f8e] MT#61856 deprecate `dialog_unconfirm()`
+  * [6cc463d] MT#61856 call_get_dialogue: remove `__monologue_unconfirm()` dups
+  * [4bce6bd] MT#61856 call.h: fix `stream_params` typo
+  * [0469eaf] MT#61856 call.h: make `packet_stream_last_packet()` inliner consistent
+  * [8b5f505] MT#61856 call.c/.h: fix commentary and declaration typos
+  * [10c003a] MT#61856 `!IS_OWN_CALL()` has a dedicated equivalent
+  * [7859619] MT#61856 call.h: add some macro hygiene
+  * [89e126a] MT#61856 call_flags: attr manipulations, return if unsupported
+  * [08e8fe7] MT#61856 call_flags: log wrong type used in sdp media remove
+  * [e87cdab] MT#61856 call_flags: `call_ng_flags_str_pair_ht()` might return error
+  * [a5e1a83] MT#61856 call_flags: return actual error
+  * [a7b24c9] MT#61856 call_flags: improve styling in `call_ng_flags_prefix()`
+  * [98512e0] MT#61856 call_flags: reorder guards in `ng_sdp_attr_manipulations_iter()`
+  * [d651b4c] MT#61856 call_flags: code comment typos
+  * [d1aa035] MT#61856 call_flags: drop support of replace `session-connection`
+  * [b659b23] MT#61856 main: prevent duplicated usage of `F` shortcut
+  * [df32af1] MT#61856 main: redis host/port parsing
+  * [bcd92e1] MT#61856 main: rtpe_config, don't accept xmlrpc timeout < 0
+  * [0f2eaff] MT#61856 main: rtpe_config, check `0 <= silence_detect <= 100`
+  * [a80afc5] MT#61856 main: moh max duration, correctly parse it
+  * [442e783] MT#61856 main: validate min/max port in `add_if_from_config()`
+  * [9e1f4c1] MT#61856 main: validate global port range
+  * [27b968c] MT#61856 main: remove some trailing spaces
+  * [5c01cfd] MT#61856 main: dealloc `addr`
+  * [bb2139e] MT#61856 main: properly log failure in `do_transcode_config()`
+  * [ff86028] MT#61856 main: `initial_rtpe_config` copy completeness
+  * [15bc48b] MT#61856 main: use `die()` instead of `abort()`
+  * [96634a7] MT#61856 main: fix some word typos
+  * [57350ab] MT#61856 main: remove usless `n`s in `die()` calls
+  * [923da55] MT#61856 main: validate more time/count options
+  * [a7a46e3] MT#61856 control_ng: `control_ng_process_payload()` allocate dict
+  * [ab534f3] MT#61856 control_ng: correct decode JSON error string
+  * [bb8b91e] MT#61856 control_ng: `json_list_iter()` handle `item_callback`
+  * [95c59e1] MT#61856 control_ng: init err response to dict by default
+  * [c6ef370] MT#61856 control_ng: add `prepare_resp_ctx()` for resp ctx
+  * [0e44164] MT#61856 control_ng: appeal to parser via local ptr
+  * [e09c232] MT#61856 control_ng: for JSON err resp, use own parser
+  * [bdb8dc4] MT#61856 control_ng: `prepare_resp_ctx()` check command ctx parser
+  * [2dc3014] MT#62750 media_player: revert `ilog()`
+  * [7a83ce8] MT#62750 media_player: skip MP init if there is ongoing MoH
+  * [c5fef5e] MT#62750 stop media: if MoH is ongoing, ignore the command
+  * [822e5b7] MT#61856 control_ng: avoid duplicate includes
+  * [227e017] MT#61856 control_ng: hardening for `bencode_pretty_print()`
+  * [e36ad85] MT#61856 control_ng: add some spaces clean-ups
+  * [34bb030] MT#61856 control_ng: make NG commands consistent
+  * [4203e10] MT#61856 control_ng: generate enum from NG_COMMANDS
+  * [75ab591] MT#62750 media_player: guard `call_stop_media_for_ml()`
+  * [fff6e5a] MT#61856 media_player: calculate cache times in us
+  * [04655f3] MT#61856 media_player: use `media_expire_us`
+  * [b8a0dd5] MT#61856 media_player: get db id, release mysql res
+  * [b04cf12] MT#61856 media_player: use `str_free()` for cached file keys
+  * [7a4feef] MT#61856 media_player: add cached file func, name ownership issue
+  * [b79b99e] MT#61856 media_player: clean partially initialized AV resources
+  * [ad8911e] MT#61856 media_player: cache entry free, add `kernel_idx` guard
+  * [93c49e9] MT#61856 media_player: refactor kernel_idx none entry
+  * [6611e15] MT#61856 call_interfaces: streams print hardening
+  * [3285aec] MT#61856 call_interfaces: block silence media, iteration bug
+  * [b6a3cc8] MT#61856 call_interfaces: use enum value for `stream_address_format`
+  * [962a869] MT#61856 call_interfaces: play dtmf, use audio sink only
+  * [df56d3c] MT#61856 call_interfaces: subscriber answer, check given sdp
+  * [8e527b4] MT#61856 call_interfaces: `call_transform_ng()` add iteration guards
+  * [d0b3802] MT#61856 call_interfaces: avoid double header includes
+  * [022942a] MT#61856 control_ng: extend macro list with the wrapper name
+  * [095ecb2] MT#61856 control_ng: extend NG_COMMANDS macro
+  * [98d9bf0] MT#61856 control_ng: move cli.h include into header
+  * [551ba3d] MT#61856 control_ng: introduce NG commands table
+  * [cc55764] MT#61856 control_ng: add func for command lookup
+  * [f63f81e] MT#61856 control_ng: substitute switch lookup
+  * [c9248e4] MT#61856 control_ng: leave some TODOers
+  * [67ab631] MT#61856 control_ng: preserve support of "CLI"
+  * [3820f20] MT#61856 call_interfaces: free `info_re`
+  * [c786415] MT#61856 call_interfaces: avoid double includes
+  * [9461593] MT#61856 call_interfaces: make `_ng_basic_errors` const correct
+  * [8d457de] MT#61856 call_interfaces: small typos and formatting issues
+  * [c6dfd17] MT#61856 call_interfaces: style consistency in pointers usage
+  * [dd01ebf] MT#61856 media_player: use `db-cache-expire`
+  * [c6cfe59] MT#61856 make `db-cache-expire` microseconds treated
+  * [5d67968] MT#61856 update expire rtpe_config object names
+  * [e7b9897] MT#61856 media_player: check if frame seek failed
+  * [89f8eb4] MT#61856 media_player: release previous `ssrc` when it differs
+  * [7d585b8] MT#61856 media_player: use dedicated `KERNEL_IDX_NONE`
+  * [ce5046b] MT#61856 media_player: move `KERNEL_IDX_NONE` to header
+  * [518fecf] MT#61856 media_player: correct `send_timer_launch()` for send timer thread
+  * [983b876] MT#61856 media_player: remove unnecessary semicolons
+  * [ef15205] MT#61856 media_player: make `*.db_id`s unsigned
+
+  [ Jake Robers ]
+  * [cc0f04f] MT#55283 add(Dockerfile): libip4tc2 to runtime image
+
+  [ OrbisAI Security ]
+  * [ad6fbef] MT#55283 recording-daemon: add static_assert for payload_type bounds invariant
+
+  [ Javier Montoro ]
+  * [90f4f8e] MT#55283 differentiate sequence-gap based and rtcp based packets lost
+
+  [ Victor Seva ]
+  * [164c526] MT#55283 pkg/deb: support Ubuntu Resolute 26.04 LTS
+
+ -- Sipwise Jenkins Builder <jenkins@sipwise.com>  Mon, 15 Jun 2026 15:34:23 +0200
+
+ngcp-rtpengine (26.1.0.0+0~mr26.1.0.0) unstable; urgency=medium
+
+  [ Guillem Jover ]
+  * [59b859a] MT#62763 perl: Do not mix low and high boolean operators
+  * [061b556] MT#62763 Fix pycodestyle issues
+
+  [ Denys Pozniak ]
+  * [1542f8f] MT#55283 Add no-tls-id flag to disable a=tls-id SDP attribute generation
+
+  [ Tom Briden ]
+  * [4c8e226] MT#55283 streambuf: check pointer isn't NULL before trying to free it
+  * [92da915] MT#55283 recording: align metafile cursor with parsed metadata bytes
+
+  [ Richard Fuchs ]
+  * [e015250] MT#55283 fix handing of sub-ans with extra media
+  * [43c3b10] MT#55283 add test for I35761075c2
+  * [a6f2039] MT#55283 add more iqueue methods
+  * [cdba96c] MT#55283 switch subscriptions to intrusive list
+  * [a255e84] MT#55283 be more selective for sub unkernel
+  * [62f5076] MT#55283 save per-media stream_params
+  * [764368c] MT#55283 subscribe requests per media
+  * [027768f] MT#55283 combine sub-ans logic
+  * [c576286] MT#55283 remove redundant loop
+  * [ba8c0fa] MT#55283 allow null media_id
+  * [bc85945] MT#55283 split out media_gen_media_id
+  * [05268aa] MT#55283 don't look up dst media by src media_id
+  * [0b82e17] MT#55283 don't copy media_id from src to dst
+  * [8f0af25] MT#55283 add test for a=mid collision
+  * [4ea7873] MT#55283 update memory arena logic
+  * [ce02900] MT#55283 duplicate cache PTs into cache arena
+  * [23203d9] MT#55283 add some const qualifiers
+  * [cfe9a58] MT#55283 extend "answer only" logic
+  * [8a54eb9] MT#55283 tests for I7e2efc4347
+  * [1469e06] MT#55283 also use offered_codecs for the answerer
+  * [22a567b] MT#55283 tests for I1f9a15763
+  * [f332066] MT#55283 some more tests
+  * [cb3edfb] MT#55283 modernise t_hash_table_iter
+  * [1f7d9e5] MT#55283 improvements for clang
+  * [5926aac] MT#55283 combine identical HT types
+  * [8866c42] MT#55283 extend arena strcpy/ref usage
+  * [f307c32] MT#55283 fix buffer merge logic
+  * [68c6bf6] MT#55283 update GH build actions
+  * [2ab345c] MT#55283 move call components into arena
+  * [76d5e6d] MT#55283 support from-tag aliases
+  * [b9c24cb] MT#55283 rename macro
+  * [6a7cba0] MT#55283 simplify macro
+  * [c27ecf4] MT#55283 facilitate media reuse for updated subs
+  * [14fbc4f] MT#55283 tests for I410c6af17e
+  * [d2f7291] MT#55283 honour RPC callback also for final t/out
+  * [c2f71fa] MT#55283 add RPC URL to logging
+  * [db1307d] MT#55283 fix incorrect substituted RPC URL
+  * [9a3f33a] MT#55283 fix stream close race condition
+  * [b7dbc4b] MT#55283 rework info printing for sub-req
+  * [0f7774d] MT#55283 set media label only for out direction
+  * [9a65ab0] MT#55283 parse a=label
+  * [63a1c8e] MT#55283 tests for I021f44ba2
+  * [d8915ab] MT#55283 rename SDP origin fields
+  * [e948e5a] MT#55283 move setting sdp_orig_out
+  * [52b19f4] MT#55283 decouple SDP origin settings
+  * [aa5413d] MT#55283 remove RELEASE_DATE
+  * [12f935d] MT#55283 support bidirectional publish
+  * [4d417cd] MT#55283 add a/a/c flag to client script
+  * [e519ef4] MT#55283 add missing lock for subscribe streams
+  * [f2d34f3] MT#55283 add empty .release-version tag file
+  * [33bcd6a] MT#55283 use .release-version info while building
+  * [02916e7] MT#55283 honour .release-version also for .ko
+  * [502e0b7] MT#55283 improve asymmetric codec logic
+  * [24d033d] MT#55283 test for Ie401db500
+  * [14769ec] MT#55283 fix refcount release
+  * [7e6c2c3] MT#55283 improve version handling
+  * [11dea69] MT#55283 make eof flag atomic
+  * [ff0cdf8] MT#55283 store ref to stream object in priv data
+  * [3536c4a] MT#55283 support anonymous publish
+  * [50874b2] MT#55283 amend publish docs
+  * [5a88605] MT#55283 document directional flag
+  * [62ac250] MT#55283 remove privacy markers from CLI
+  * [59432f0] MT#55283 add aliases to output
+  * [0a9e85e] MT#55283 refactor update_all functions
+  * [fd48c1f] MT#55283 move type definition
+  * [b157683] MT#55283 move enabling of audio player
+  * [f6a5087] MT#55283 fuller sub update
+  * [e59ee48] MT#55283 update unsubscribed subs as well
+  * [c17a48d] MT#55283 annotate functions & const qualify
+  * [14dde79] MT#55283 better tolerate flags parsing
+  * [b89f1f5] MT#55283 fix test return value
+  * [07c0613] MT#55283 refactor c_s_synth
+  * [b83f520] MT#55283 add alternative spellings
+  * [dd3b4ea] MT#55283 handle possible null
+  * [b121f38] MT#55283 refactor c_s_transcode
+  * [320b293] MT#55283 add "create" method
+  * [4aaa498] MT#55283 docs for "create"
+  * [812bf1a] MT#55283 tests for "create"
+  * [61c4cf8] MT#55283 add new connect options
+  * [dfa161c] MT#55283 docs for Ic175e5d7cd
+  * [ef817fc] MT#55283 support individual unsubscribe action
+  * [b170b2a] MT#55283 add audio-player alternative spelling
+  * [fd992d5] MT#55283 support bidirectional unsubscribe
+  * [3fb608b] MT#55283 fuller init of subs on connect
+  * [e1f5341] MT#55283 extended connect tests
+  * [959bd66] MT#55283 switch from off_t to size_t
+  * [a5d067f] MT#55283 use medias_q instead of subscriptions
+  * [9491a81] MT#55283 simplify call2_get
+  * [0efd1b1] MT#55283 rename media_match
+  * [19e2aa2] MT#55283 extended "connect" matching
+  * [3a92294] MT#55283 tests for If751f1373
+  * [896a34f] MT#55283 docs for If751f137
+
+  [ Orgad Shaneh ]
+  * [c40357c] MT#55283 Add g729 package to docker build
+
+  [ Hossein Yavari ]
+  * [0b72687] MT#55283 Add configurable HTTP idle (keepalive) timeout
+
+  [ Michael Prokop ]
+  * [e9fc1b1] MT#55283 GH: automate GitHub releases for mr* tags, build Debian packages for PRs + update to trixie
+
+  [ Morten Tryfoss ]
+  * [14919df] MT#55283 Make sure modprobe params are set for kernel module when using systemd, the same way as done in init.d scripts.
+
+  [ Nikolay Feshenko ]
+  * [352bda7] MT#55283 add inject start/stop commands for one-way audio injection
+
+  [ Sean Ferguson ]
+  * [ff07591] MT#55283 Fix segfault in play media with record-egress enabled
+  * [b916bdc] MT#55283 Fix recording-file parameter ignores for pcap recording method
+
+  [ Andrew Yager ]
+  * [b1aec46] MT#55283 kernel-module: detect nft_expr_ops.validate signature via compile test
+
+ -- Sipwise Jenkins Builder <jenkins@sipwise.com>  Tue, 07 Apr 2026 12:58:59 +0200
+
 ngcp-rtpengine (14.2.0.0+0~mr14.2.0.0) unstable; urgency=medium
 
   [ Richard Fuchs ]

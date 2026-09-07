@@ -17,7 +17,6 @@
 #ifdef HAVE_CODEC_CHAIN
 #include <codec-chain/types.h>
 #endif
-#include "log.h"
 #include "loglib.h"
 
 struct thread_buf {
@@ -240,16 +239,15 @@ void config_load_ext(int *argc, char ***argv, GOptionEntry *app_entries, const c
 
 	g_autoptr(GKeyFile) kf = g_key_file_new();
 
-#define ll(system, descr) \
-		{ "log-level-" #system,	0, 0, G_OPTION_ARG_INT,	&rtpe_common_config_ptr->log_levels[log_level_index_ ## system],"Log level for: " descr,"INT"		},
-
-	GOptionEntry shared_options[] = {
+	GOptionEntry shared_entries_head[] = {
 		{ "version",		'v', 0, G_OPTION_ARG_NONE,	&version,	"Print build time and exit",		NULL		},
 		{ "config-file",	0,   0, G_OPTION_ARG_FILENAME,	&rtpe_common_config_ptr->config_file,	"Load config from this file",		"FILE"		},
 		{ "config-section",	0,   0, G_OPTION_ARG_STRING,	&rtpe_common_config_ptr->config_section,"Config file section to use",		"STRING"	},
 		{ "log-facility",	0,   0,	G_OPTION_ARG_STRING,	&rtpe_common_config_ptr->log_facility,	"Syslog facility to use for logging",	"daemon|local0|...|local7"},
 		{ "log-level",		'L', 0, G_OPTION_ARG_INT,	&rtpe_common_config_ptr->default_log_level,"Default log level",			"INT"		},
-#include "loglevels.h"
+	};
+
+	GOptionEntry shared_entries_tail[] = {
 		{ "log-stderr",		'E', 0, G_OPTION_ARG_NONE,	&rtpe_common_config_ptr->log_stderr,	"Log on stderr instead of syslog",	NULL		},
 		{ "split-logs",		0, 0,	G_OPTION_ARG_NONE,	&rtpe_common_config_ptr->split_logs,	"Split multi-line log messages",	NULL		},
 		{ "max-log-line-length",0,   0,	G_OPTION_ARG_INT,	&rtpe_common_config_ptr->max_log_line_length,	"Break log lines at this length","INT"		},
@@ -265,27 +263,44 @@ void config_load_ext(int *argc, char ***argv, GOptionEntry *app_entries, const c
 		{ "io-uring",		0,0,	G_OPTION_ARG_NONE,	&rtpe_common_config_ptr->io_uring,	"Use io_uring",				NULL },
 		{ "io-uring-buffers",	0,0,	G_OPTION_ARG_INT,	&rtpe_common_config_ptr->io_uring_buffers,"Number of io_uring entries per thread","INT" },
 #endif
+#ifdef WITH_TRANSCODING
 		{ "evs-lib-path",	0,0,	G_OPTION_ARG_FILENAME,	&rtpe_common_config_ptr->evs_lib_path,	"Location of .so for 3GPP EVS codec",	"FILE"		},
+		{ "video-packet-size",	0,0,	G_OPTION_ARG_INT,	&rtpe_common_config_ptr->video_pkt_size,"Target maximum size of video RTP packets","INT"	},
 #ifdef HAVE_CODEC_CHAIN
 		{ "codec-chain-lib-path",0,0,	G_OPTION_ARG_FILENAME,	&rtpe_common_config_ptr->codec_chain_lib_path,"Location of libcodec-chain.so",	"FILE"		},
 		{ "codec-chain-runners",0,0,	G_OPTION_ARG_INT,	&rtpe_common_config_ptr->codec_chain_runners,"Number of chain runners per codec","INT"		},
 		{ "codec-chain-concurrency",0,0,G_OPTION_ARG_INT,	&rtpe_common_config_ptr->codec_chain_concurrency,"Max concurrent codec jobs per runner","INT"	},
 		{ "codec-chain-async",0,0,	G_OPTION_ARG_INT,	&rtpe_common_config_ptr->codec_chain_async,"Number of background callback threads","INT"	},
+		{ "codec-chain-nonblock",0,0,	G_OPTION_ARG_NONE,	&rtpe_common_config_ptr->codec_chain_nonblock,"Non-blocking operation of async codecs",NULL},
+		{ "codec-chain-interval",0,0,	G_OPTION_ARG_INT,	&rtpe_common_config_ptr->codec_chain_interval,"Microseconds between runs",	"INT"	},
 		{ "codec-chain-opus-application",0,0,G_OPTION_ARG_STRING,&opus_application,			"Opus application",			"default|VoIP|audio|low-delay"	},
 		{ "codec-chain-opus-complexity",0,0,G_OPTION_ARG_INT,	&rtpe_common_config_ptr->codec_chain_opus_complexity,"Opus encoding complexity (0..10)","INT"	},
 #endif
-		{ 0 }
+#endif
 	};
-#undef ll
 
-	// prepend shared CLI options
-	unsigned int shared_len = options_length(shared_options);
+	// construct complete list
+	unsigned int shared_len = G_N_ELEMENTS(shared_entries_head) + num_log_levels + G_N_ELEMENTS(shared_entries_tail);
 	unsigned int app_len = options_length(app_entries);
 	size_t entries_size = sizeof(GOptionEntry) * (shared_len + app_len + 1);
 
 	g_autoptr(GOptionEntry) entries = malloc(entries_size);
-	memcpy(entries, shared_options, sizeof(*entries) * shared_len);
+	memcpy(&entries[0], shared_entries_head, sizeof(shared_entries_head));
+
+	char opt_names[MAX_LOG_LEVELS][32];
+	char opt_descs[MAX_LOG_LEVELS][64];
+	for (unsigned int i = 0; i < num_log_levels; i++) {
+		snprintf(opt_names[i], sizeof(opt_names[i]), "log-level-%s", log_level_names[i]);
+		snprintf(opt_descs[i], sizeof(opt_descs[i]), "Log level for: %s", log_level_descriptions[i]);
+		entries[G_N_ELEMENTS(shared_entries_head) + i] = (GOptionEntry) {
+			 opt_names[i],	0, 0, G_OPTION_ARG_INT, &rtpe_common_config_ptr->log_levels[i], opt_descs[i], "INT"
+		};
+	}
+
+	memcpy(&entries[G_N_ELEMENTS(shared_entries_head) + num_log_levels], shared_entries_tail, sizeof(shared_entries_tail));
+
 	memcpy(&entries[shared_len], app_entries, sizeof(*entries) * (app_len + 1));
+
 	g_autoptr(GOptionEntry) entries_copy = malloc(entries_size);
 	memcpy(entries_copy, entries, entries_size);
 
@@ -477,13 +492,16 @@ out:
 
 #ifdef HAVE_CODEC_CHAIN
 	if (rtpe_common_config_ptr->codec_chain_runners <= 0)
-		rtpe_common_config_ptr->codec_chain_runners = 4;
+		rtpe_common_config_ptr->codec_chain_runners = 2;
 
 	if (rtpe_common_config_ptr->codec_chain_concurrency <= 0)
 		rtpe_common_config_ptr->codec_chain_concurrency = 256;
 
 	if (rtpe_common_config_ptr->codec_chain_async < 0)
 		rtpe_common_config_ptr->codec_chain_async = 0;
+
+	if (rtpe_common_config_ptr->codec_chain_interval <= 0)
+		rtpe_common_config_ptr->codec_chain_interval = 10000;
 
 	if (rtpe_common_config_ptr->codec_chain_opus_complexity == -1)
 		rtpe_common_config_ptr->codec_chain_opus_complexity = 10;
@@ -509,6 +527,9 @@ out:
 	else if (rtpe_common_config_ptr->io_uring_buffers < 0)
 		die("Invalid value for --io-uring-buffers");
 #endif
+
+	if (rtpe_common_config_ptr->video_pkt_size <= 0)
+		rtpe_common_config_ptr->video_pkt_size = 1300;
 
 	return;
 

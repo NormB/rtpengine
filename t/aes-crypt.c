@@ -3,7 +3,7 @@
 
 #include "crypto.h"
 #include "rtplib.h"
-#include "log.h"
+#include "log_t.h"
 #include "main.h"
 #include "ssllib.h"
 
@@ -293,8 +293,4 @@ int main(int argc, char** argv) {
 		      NULL, NULL);
 
 	crypto_cleanup_session_key(&ctx);
-}
-
-int get_local_log_level(unsigned int u) {
-	return -1;
 }

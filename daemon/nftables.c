@@ -19,7 +19,8 @@
 
 #include "nft_rtpengine.h"
 
-#define HANDLER_COMMENT "rtpengine UDP handler"
+#define HANDLER_COMMENT_PREFIX "rtpengine UDP handler"
+#define HANDLER_COMMENT_FMT HANDLER_COMMENT_PREFIX " table %u"
 
 struct iterate_callbacks {
 	// called for each expression
@@ -61,6 +62,8 @@ struct add_rule_callbacks {
 	int table;
 	bool append;
 	bool xtables;
+	bool may_exist;
+	bool *created;
 };
 
 
@@ -112,7 +115,8 @@ static void check_matched_queue(struct iterate_callbacks *callbacks) {
 	//    use the rtpengine statement directly
 	//    are the dummy comment rule
 	if (!callbacks->rule_scratch.imm_jump_matched && !callbacks->rule_scratch.rtpengine_matched) {
-		if (!callbacks->rule_scratch.comment || strcmp(callbacks->rule_scratch.comment, HANDLER_COMMENT))
+		if (!callbacks->rule_scratch.comment
+				|| !g_str_has_prefix(callbacks->rule_scratch.comment, HANDLER_COMMENT_PREFIX))
 			return;
 	}
 
@@ -499,6 +503,15 @@ static const char *target_base_nft_expr(nfapi_buf *b, struct add_rule_callbacks 
 			nfapi_add_u32_attr(b, RTPEA_RTPENGINE_TABLE, callbacks->table,
 					"table %u", callbacks->table);
 
+			if (!*callbacks->created) {
+				nfapi_add_attr(b, RTPEA_RTPENGINE_CREAT, NULL, 0, "creat");
+
+				if (!callbacks->may_exist)
+					nfapi_add_attr(b, RTPEA_RTPENGINE_EXCL, NULL, 0, "excl");
+
+				*callbacks->created = true;
+			}
+
 		nfapi_nested_end(b);
 
 	nfapi_nested_end(b);
@@ -533,7 +546,10 @@ static const char *target_base_xt(nfapi_buf *b, struct add_rule_callbacks *callb
 
 static const char *comment(nfapi_buf *b, int family, struct add_rule_callbacks *callbacks) {
 	nfapi_add_str_attr(b, NFTA_RULE_CHAIN, callbacks->chain, "chain '%s'", callbacks->chain);
-	nfapi_add_binary_str_attr(b, NFTA_RULE_USERDATA, HANDLER_COMMENT, "comment '%s'", HANDLER_COMMENT);
+
+	char s[64];
+	snprintf(s, sizeof(s), HANDLER_COMMENT_FMT, callbacks->table);
+	nfapi_add_binary_str_attr(b, NFTA_RULE_USERDATA, s, "comment '%s'", s);
 
 	nfapi_nested_begin(b, NFTA_RULE_EXPRESSIONS, "expr");
 
@@ -730,9 +746,7 @@ static char *add_table(nfapi_socket *nl, int family) {
 static char *nftables_setup_family(nfapi_socket *nl, int family,
 		const char *chain, const char *base_chain, nftables_args *args)
 {
-	char *err = nftables_shutdown_family(nl, family, chain, base_chain, args);
-	if (err)
-		return err;
+	char *err;
 
 	// create the table in case it doesn't exist
 	err = add_table(nl, family);
@@ -769,6 +783,8 @@ static char *nftables_setup_family(nfapi_socket *nl, int family,
 				.table = args->table,
 				.append = args->append,
 				.xtables = args->xtables,
+				.created = &args->created,
+				.may_exist = args->may_exist,
 			});
 		if (err)
 			return err;
@@ -794,6 +810,8 @@ static char *nftables_setup_family(nfapi_socket *nl, int family,
 				.table = args->table,
 				.append = args->append,
 				.xtables = args->xtables,
+				.created = &args->created,
+				.may_exist = args->may_exist,
 			});
 		if (err)
 			return err;

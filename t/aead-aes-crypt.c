@@ -3,7 +3,7 @@
 
 #include "crypto.h"
 #include "rtplib.h"
-#include "log.h"
+#include "log_t.h"
 #include "main.h"
 
 #include <openssl/evp.h>
@@ -216,8 +216,4 @@ int main(void)
 	printf("RTCP/AEAD-AES-256-GCM Decrypt - PASS\n");
 
 	crypto_cleanup_session_key(&ctx);
-}
-
-int get_local_log_level(unsigned int u) {
-	return -1;
 }

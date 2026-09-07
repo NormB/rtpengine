@@ -6,24 +6,17 @@
 #include <assert.h>
 #include <json-glib/json-glib.h>
 
-#include "obj.h"
 #include "poller.h"
-#include "bencode.h"
-#include "log.h"
+#include "log_d.h"
 #include "cookie_cache.h"
 #include "call.h"
 #include "sdp.h"
 #include "call_interfaces.h"
-#include "socket.h"
-#include "log_funcs.h"
 #include "main.h"
 #include "statistics.h"
 #include "streambuf.h"
-#include "str.h"
 #include "homer.h"
-#include "tcp_listener.h"
-#include "main.h"
-#include "cli.h"
+#include <string.h>
 
 mutex_t rtpe_cngs_lock;
 mutex_t tcp_connections_lock;
@@ -38,40 +31,81 @@ const char magic_load_limit_strings[__LOAD_LIMIT_MAX][64] = {
 	[LOAD_LIMIT_LOAD] = "Load limit exceeded",
 	[LOAD_LIMIT_BW] = "Bandwidth limit exceeded",
 };
+
+typedef const char *(*ng_command_handler_t)(ng_command_ctx_t *ctx);
+typedef const char *(*ng_command_addr_handler_t)(ng_command_ctx_t *ctx,
+		const char *addr);
+
+struct ng_command_def {
+	enum ng_opmode opmode;
+	const char *name;
+	const char *escaped_name;
+	const char *short_name;
+	/* Only one of handler/addr_handler should be set at a time */
+	ng_command_handler_t handler;
+	ng_command_addr_handler_t addr_handler;
+};
+
+static const struct ng_command_def ng_command_defs[OP_COUNT] = {
+#define X(op, name, esc, short_name, handler) \
+	[op] = { op, name, esc, short_name, handler, NULL },
+#define XA(op, name, esc, short_name, handler) \
+	[op] = { op, name, esc, short_name, NULL, handler },
+	NG_COMMANDS(X, XA)
+#undef XA
+#undef X
+};
+
+static const struct ng_command_def *ng_command_find(const str *cmd) {
+	if (!cmd || !cmd->s)
+		return NULL;
+
+#define X(op, name, esc, short_name, handler) \
+	if (cmd->len == sizeof(name) - 1 && !memcmp(cmd->s, name, sizeof(name) - 1)) \
+		return &ng_command_defs[op];
+
+#define XA(op, name, esc, short_name, handler) \
+	if (cmd->len == sizeof(name) - 1 && !memcmp(cmd->s, name, sizeof(name) - 1)) \
+		return &ng_command_defs[op];
+
+	NG_COMMANDS(X, XA)
+
+#undef XA
+#undef X
+
+	/* Preserve behaviour: both "cli" and "CLI" must be supported */
+	if (cmd->len == sizeof("CLI") - 1 && !memcmp(cmd->s, "CLI", sizeof("CLI") - 1))
+		return &ng_command_defs[OP_CLI];
+
+	return NULL;
+}
+
+/**
+ * Compatibility arrays used outside control_ng.
+ * Keep generated from NG_COMMANDS until callers are migrated to a helper API.
+ */
 const char *ng_command_strings[OP_COUNT] = {
-	"ping", "offer", "answer", "delete", "query", "list",
-	"start recording", "stop recording", "pause recording",
-	"start forwarding", "stop forwarding", "block DTMF",
-	"unblock DTMF", "block media", "unblock media", "play media", "stop media",
-	"play DTMF", "statistics", "silence media", "unsilence media",
-	"block silence media", "unblock silence media",
-	"publish", "subscribe request",
-	"subscribe answer", "unsubscribe",
-	"inject start", "inject stop",
-	"connect", "cli", "transform"
+#define X(op, name, esc, short_name, handler) [op] = name,
+#define XA(op, name, esc, short_name, handler) [op] = name,
+	NG_COMMANDS(X, XA)
+#undef XA
+#undef X
 };
+
 const char *ng_command_strings_esc[OP_COUNT] = {
-	"ping", "offer", "answer", "delete", "query", "list",
-	"start_recording", "stop_recording", "pause_recording",
-	"start_forwarding", "stop_forwarding", "block_DTMF",
-	"unblock_DTMF", "block_media", "unblock_media", "play_media", "stop_media",
-	"play_DTMF", "statistics", "silence_media", "unsilence_media",
-	"block_silence_media", "unblock_silence_media",
-	"publish", "subscribe_request",
-	"subscribe_answer", "unsubscribe",
-	"inject_start", "inject_stop",
-	"connect", "cli", "transform"
+#define X(op, name, esc, short_name, handler) [op] = esc,
+#define XA(op, name, esc, short_name, handler) [op] = esc,
+	NG_COMMANDS(X, XA)
+#undef XA
+#undef X
 };
+
 const char *ng_command_strings_short[OP_COUNT] = {
-	"Ping", "Offer", "Answer", "Delete", "Query", "List",
-	"StartRec", "StopRec", "PauseRec",
-	"StartFwd", "StopFwd", "BlkDTMF",
-	"UnblkDTMF", "BlkMedia", "UnblkMedia", "PlayMedia", "StopMedia",
-	"PlayDTMF", "Stats", "SlnMedia", "UnslnMedia",
-	"BlkSlnMedia", "UnblkSlnMedia",
-	"Pub", "SubReq", "SubAns", "Unsub",
-	"InjStart", "InjStop",
-	"Conn", "CLI", "Trnsfm"
+#define X(op, name, esc, short_name, handler) [op] = short_name,
+#define XA(op, name, esc, short_name, handler) [op] = short_name,
+	NG_COMMANDS(X, XA)
+#undef XA
+#undef X
 };
 
 typedef struct ng_ctx {
@@ -89,12 +123,12 @@ typedef struct ng_ctx {
 } while (0)
 
 
-static bool bencode_dict_iter(const ng_parser_t *parser, bencode_item_t *input,
-		void (*callback)(const ng_parser_t *, str *key, bencode_item_t *value, helper_arg),
+static const char *bencode_dict_iter(const ng_parser_t *parser, bencode_item_t *input,
+		const char *(*callback)(const ng_parser_t *, str *key, bencode_item_t *value, helper_arg),
 		helper_arg arg)
 {
 	if (input->type != BENCODE_DICTIONARY)
-		return false;
+		return NULL;
 
 	bencode_item_t *value = NULL;
 	for (bencode_item_t *key = input->child; key; key = value->sibling) {
@@ -106,10 +140,12 @@ static bool bencode_dict_iter(const ng_parser_t *parser, bencode_item_t *input,
 		if (!bencode_get_str(key, &k))
 			continue;
 
-		callback(parser, &k, value, arg);
+		const char *err = callback(parser, &k, value, arg);
+		if (err)
+			return err;
 	}
 
-	return true;
+	return NULL;
 }
 static bool bencode_is_dict(bencode_item_t *arg) {
 	return arg->type == BENCODE_DICTIONARY;
@@ -120,24 +156,28 @@ static bool bencode_is_list(bencode_item_t *arg) {
 static bool bencode_is_int(bencode_item_t *arg) {
 	return arg->type == BENCODE_INTEGER;
 }
-static void bencode_list_iter(const ng_parser_t *parser, bencode_item_t *list,
-		void (*str_callback)(str *key, unsigned int, helper_arg),
-		void (*item_callback)(const ng_parser_t *, bencode_item_t *, helper_arg),
+static const char *bencode_list_iter(const ng_parser_t *parser, bencode_item_t *list,
+		const char *(*str_callback)(str *key, unsigned int, helper_arg),
+		const char *(*item_callback)(const ng_parser_t *, bencode_item_t *, helper_arg),
 		helper_arg arg)
 {
 	if (list->type != BENCODE_LIST)
-		return;
+		return NULL; // return error?
 	str s;
 	unsigned int idx = 0;
 	for (bencode_item_t *it = list->child; it; it = it->sibling) {
-		if (bencode_get_str(it, &s))
-			str_callback(&s, idx, arg);
+		const char *err = NULL;
+		if (bencode_get_str(it, &s) && str_callback)
+			err = str_callback(&s, idx, arg);
 		else if (item_callback)
-			item_callback(parser, it, arg);
+			err = item_callback(parser, it, arg);
 		else
 			ilog(LOG_DEBUG, "Ignoring non-string value in list");
+		if (err)
+			return err;
 		idx++;
 	}
+	return NULL;
 }
 static long long bencode_get_int(bencode_item_t *arg) {
 	return arg->value;
@@ -217,7 +257,7 @@ static bool json_is_int(JsonNode *n) {
 	}
 	return false;
 }
-static char *json_dict_get_str(JsonNode *dict, const char *entry, str *out) {
+static str json_dict_get_str(JsonNode *dict, const char *entry) {
 	JsonObject *o = json_node_get_object(dict);
 	if (!o)
 		goto out;
@@ -227,11 +267,9 @@ static char *json_dict_get_str(JsonNode *dict, const char *entry, str *out) {
 	const char *s = json_node_get_string(n);
 	if (!s)
 		goto out;
-	*out = STR(s);
-	return out->s;
+	return STR(s);
 out:
-	*out = STR_NULL;
-	return NULL;
+	return STR_NULL;
 }
 static void json_pretty_print(JsonNode *a, GString *out) {
 	JsonGenerator *g = json_generator_new();
@@ -310,51 +348,65 @@ static bool json_dict_contains(JsonNode *on, const char *ele) {
 }
 static void json_dict_iter_fn(JsonObject *o, const char *key, JsonNode *val, void *arg) {
 	void **ptrs = arg;
-	void (*callback)(const ng_parser_t *, str *key, JsonNode *value, helper_arg) = ptrs[1];
-	callback(ptrs[0], STR_PTR(key), val, ptrs[2]);
+	const char *(*callback)(const ng_parser_t *, str *key, JsonNode *value, helper_arg) = ptrs[1];
+	const char *err = callback(ptrs[0], STR_PTR(key), val, ptrs[2]);
+	if (err)
+		ptrs[3] = (void *) err;
 }
 
-static bool json_dict_iter(const ng_parser_t *parser, JsonNode *input,
-		void (*callback)(const ng_parser_t *, str *key, JsonNode *value, helper_arg),
+static const char *json_dict_iter(const ng_parser_t *parser, JsonNode *input,
+		const char *(*callback)(const ng_parser_t *, str *key, JsonNode *value, helper_arg),
 		helper_arg arg)
 {
 	if (json_node_get_node_type(input) != JSON_NODE_OBJECT)
-		return false;
+		return NULL;
 
 	JsonObject *o = json_node_get_object(input);
 	if (!o)
 		return false;
 
-	const void *ptrs[3] = { parser, callback, arg.generic };
+	const void *ptrs[4] = { parser, callback, arg.generic };
 	json_object_foreach_member(o, json_dict_iter_fn, ptrs);
 
-	return true;
+	if (ptrs[3])
+		return ptrs[3];
+
+	return NULL;
 }
-static void json_list_iter(const ng_parser_t *parser, JsonNode *list,
-		void (*str_callback)(str *key, unsigned int, helper_arg),
-		void (*item_callback)(const ng_parser_t *parser, JsonNode *, helper_arg),
+static const char *json_list_iter(const ng_parser_t *parser, JsonNode *list,
+		const char *(*str_callback)(str *key, unsigned int, helper_arg),
+		const char *(*item_callback)(const ng_parser_t *parser, JsonNode *, helper_arg),
 		helper_arg arg)
 {
 	if (json_node_get_node_type(list) != JSON_NODE_ARRAY)
-		return;
+		return NULL; // return error?
 
 	JsonArray *a = json_node_get_array(list);
 	if (!a)
-		return;
+		return NULL; // return error?
 
 	unsigned int l = json_array_get_length(a);
 	for (unsigned int i = 0; i < l; i++) {
 		JsonNode *n = json_array_get_element(a, i);
+		const char *err = NULL;
 		if (json_node_get_node_type(n) == JSON_NODE_VALUE
-				&& json_node_get_value_type(n) == G_TYPE_STRING)
+				&& json_node_get_value_type(n) == G_TYPE_STRING
+				&& str_callback)
 		{
 			const char *s = json_node_get_string(n);
 			if (s)
-				str_callback(STR_PTR(s), i, arg);
+				err = str_callback(STR_PTR(s), i, arg);
 		}
 		else
-			item_callback(parser, n, arg);
+			if (item_callback)
+				err = item_callback(parser, n, arg);
+			else
+				ilog(LOG_DEBUG, "Ignoring non-string value in list");
+		if (err)
+			return err;
 	}
+
+	return NULL;
 }
 static str *json_get_str(JsonNode *a, str *out) {
 	const char *s = json_node_get_string(a);
@@ -616,6 +668,8 @@ static void bencode_pretty_print(bencode_item_t *el, GString *s) {
 				g_string_append(s, sep);
 				bencode_pretty_print(chld, s);
 				g_string_append(s, ": ");
+				if (!chld->sibling)
+					break;
 				chld = chld->sibling;
 				bencode_pretty_print(chld, s);
 				sep = ", ";
@@ -636,7 +690,7 @@ struct control_ng_stats* get_control_ng_stats(const sockaddr_t *addr) {
 	if (!cur) {
 		cur = g_new0(__typeof(*cur), 1);
 		cur->proxy = *addr;
-		ilogs(control, LOG_DEBUG,"Adding a proxy for control ng stats:%s", sockaddr_print_buf(addr));
+		ilogs(control, LOG_DEBUG, "Adding a proxy for control ng stats:%s", sockaddr_print_buf(addr));
 
 		for (int i = 0; i < OP_COUNT; i++) {
 			struct ng_command_stats *c = &cur->cmd[i];
@@ -669,10 +723,25 @@ ng_buffer *ng_buffer_new(struct obj *ref) {
 	return ngbuf;
 }
 
+/**
+ * Initialize resp context.
+ */
+static void prepare_resp_ctx(ng_command_ctx_t *command_ctx, const ng_parser_t *parser)
+{
+	if (!command_ctx->parser_ctx.parser)
+		parser->init(&command_ctx->parser_ctx, &command_ctx->ngbuf->buffer);
+
+	/* TODO: JSON-like structured data probably needs to have own `parser_arg`
+	 * because otherwise resp is always added as dictionary */
+	command_ctx->resp = command_ctx->parser_ctx.parser->dict(&command_ctx->parser_ctx);
+	assert(command_ctx->resp.gen != NULL);
+}
+
 static void control_ng_process_payload(ng_ctx *hctx, str *reply, str *data, const endpoint_t *sin, char *addr, struct obj *ref,
 		struct ng_buffer **ngbufp)
 {
-	str cmd = STR_NULL, callid;
+	str cmd = STR_NULL;
+	const struct ng_command_def *cmd_def;
 	const char *errstr, *resultstr;
 	GString *log_str;
 	int64_t cmd_start, cmd_stop, cmd_process_time = {0};
@@ -680,52 +749,64 @@ static void control_ng_process_payload(ng_ctx *hctx, str *reply, str *data, cons
 
 	ng_command_ctx_t command_ctx = {.opmode = -1};
 	const ng_parser_t *parser = &ng_parser_native;
+	const ng_parser_t *json_parser = &ng_parser_json;
 
 	command_ctx.ngbuf = *ngbufp = ng_buffer_new(ref);
 
 	errstr = "Invalid data (no payload)";
-	if (data->len <= 0)
+	if (data->len <= 0) {
+		prepare_resp_ctx(&command_ctx, parser);
 		goto err_send;
+	}
 
 	/* Bencode dictionary */
 	if (data->s[0] == 'd') {
-		ng_parser_native.init(&command_ctx.parser_ctx, &command_ctx.ngbuf->buffer);
+		parser->init(&command_ctx.parser_ctx, &command_ctx.ngbuf->buffer);
 
 		command_ctx.req.benc = bencode_decode_expect_str(&command_ctx.ngbuf->buffer, data, BENCODE_DICTIONARY);
 		errstr = "Could not decode bencode dictionary";
-		if (!command_ctx.req.benc)
+		if (!command_ctx.req.benc) {
+			prepare_resp_ctx(&command_ctx, parser);
 			goto err_send;
+		}
 	}
 
 	/* JSON */
 	else if (data->s[0] == '{') {
-		ng_parser_json.init(&command_ctx.parser_ctx, &command_ctx.ngbuf->buffer);
+		json_parser->init(&command_ctx.parser_ctx, &command_ctx.ngbuf->buffer);
 		command_ctx.ngbuf->json = json_parser_new();
 		errstr = "Failed to parse JSON document";
-		if (!json_parser_load_from_data(command_ctx.ngbuf->json, data->s, data->len, NULL))
+		if (!json_parser_load_from_data(command_ctx.ngbuf->json, data->s, data->len, NULL)) {
+			prepare_resp_ctx(&command_ctx, json_parser);
 			goto err_send;
+		}
 		command_ctx.req.json = json_parser_get_root(command_ctx.ngbuf->json);
-		errstr = "Could not decode bencode dictionary";
-		if (!command_ctx.req.json || !ng_parser_json.is_dict(command_ctx.req))
+		errstr = "Could not decode JSON dictionary";
+		if (!command_ctx.req.json || !json_parser->is_dict(command_ctx.req)) {
+			prepare_resp_ctx(&command_ctx, json_parser);
 			goto err_send;
+		}
 	}
 
 	else {
+		prepare_resp_ctx(&command_ctx, parser);
 		errstr = "Invalid NG data format";
 		goto err_send;
 	}
 
 	parser = command_ctx.parser_ctx.parser;
 
+	/* TODO: JSON-like structured data probably needs to have own `parser_arg`
+	 * because otherwise resp is always added as dictionary */
 	command_ctx.resp = parser->dict(&command_ctx.parser_ctx);
 	assert(command_ctx.resp.gen != NULL);
 
-	parser->dict_get_str(command_ctx.req, "command", &cmd);
+	cmd = parser->dict_get_str(command_ctx.req, "command");
 	errstr = "Dictionary contains no key \"command\"";
 	if (!cmd.s)
 		goto err_send;
 
-	parser->dict_get_str(command_ctx.req, "call-id", &callid);
+	str callid = parser->dict_get_str(command_ctx.req, "call-id");
 	log_info_str(&callid);
 
 	ilogs(control, LOG_INFO, "Received command '"STR_FORMAT"' from %s", STR_FMT(&cmd), addr);
@@ -746,131 +827,31 @@ static void control_ng_process_payload(ng_ctx *hctx, str *reply, str *data, cons
 	// start command timer
 	cmd_start = now_us();
 
-	switch (__csh_lookup(&cmd)) {
-		case CSH_LOOKUP("ping"):
-			resultstr = "pong";
-			command_ctx.opmode = OP_PING;
-			break;
-		case CSH_LOOKUP("offer"):
-			command_ctx.opmode = OP_OFFER;
-			errstr = call_offer_ng(&command_ctx, addr);
-			break;
-		case CSH_LOOKUP("answer"):
-			command_ctx.opmode = OP_ANSWER;
-			errstr = call_answer_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("delete"):
-			command_ctx.opmode = OP_DELETE;
-			errstr = call_delete_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("query"):
-			command_ctx.opmode = OP_QUERY;
-			errstr = call_query_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("list"):
-			command_ctx.opmode = OP_LIST;
-			errstr = call_list_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("start recording"):
-			command_ctx.opmode = OP_START_RECORDING;
-			errstr = call_start_recording_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("stop recording"):
-			command_ctx.opmode = OP_STOP_RECORDING;
-			errstr = call_stop_recording_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("pause recording"):
-			command_ctx.opmode = OP_PAUSE_RECORDING;
-			errstr = call_pause_recording_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("start forwarding"):
-			command_ctx.opmode = OP_START_FORWARDING;
-			errstr = call_start_forwarding_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("stop forwarding"):
-			command_ctx.opmode = OP_STOP_FORWARDING;
-			errstr = call_stop_forwarding_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("block DTMF"):
-			command_ctx.opmode = OP_BLOCK_DTMF;
-			errstr = call_block_dtmf_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("unblock DTMF"):
-			command_ctx.opmode = OP_UNBLOCK_DTMF;
-			errstr = call_unblock_dtmf_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("block media"):
-			command_ctx.opmode = OP_BLOCK_MEDIA;
-			errstr = call_block_media_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("unblock media"):
-			command_ctx.opmode = OP_UNBLOCK_MEDIA;
-			errstr = call_unblock_media_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("silence media"):
-			command_ctx.opmode = OP_SILENCE_MEDIA;
-			errstr = call_silence_media_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("unsilence media"):
-			command_ctx.opmode = OP_UNSILENCE_MEDIA;
-			errstr = call_unsilence_media_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("play media"):
-			command_ctx.opmode = OP_PLAY_MEDIA;
-			errstr = call_play_media_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("stop media"):
-			command_ctx.opmode = OP_STOP_MEDIA;
-			errstr = call_stop_media_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("play DTMF"):
-			command_ctx.opmode = OP_PLAY_DTMF;
-			errstr = call_play_dtmf_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("statistics"):
-			command_ctx.opmode = OP_STATISTICS;
-			errstr = statistics_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("publish"):
-			command_ctx.opmode = OP_PUBLISH;
-			errstr = call_publish_ng(&command_ctx, addr);
-			break;
-		case CSH_LOOKUP("subscribe request"):
-			command_ctx.opmode = OP_SUBSCRIBE_REQ;
-			errstr = call_subscribe_request_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("subscribe answer"):
-			command_ctx.opmode = OP_SUBSCRIBE_ANS;
-			errstr = call_subscribe_answer_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("unsubscribe"):
-			command_ctx.opmode = OP_UNSUBSCRIBE;
-			errstr = call_unsubscribe_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("inject start"):
-			command_ctx.opmode = OP_INJECT_START;
-			errstr = call_inject_start_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("inject stop"):
-			command_ctx.opmode = OP_INJECT_STOP;
-			errstr = call_inject_stop_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("connect"):
-			command_ctx.opmode = OP_CONNECT;
-			errstr = call_connect_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("cli"):
-		case CSH_LOOKUP("CLI"):
-			command_ctx.opmode = OP_CLI;
-			errstr = cli_ng(&command_ctx);
-			break;
-		case CSH_LOOKUP("transform"):
-			command_ctx.opmode = OP_TRANSFORM;
-			errstr = call_transform_ng(&command_ctx);
-			break;
-		default:
-			errstr = "Unrecognized command";
+	command_ctx.opmode = OP_OTHER;
+	cmd_def = ng_command_find(&cmd);
+
+	/* undefined command */
+	if (!cmd_def) {
+		errstr = "Unrecognized command";
+		goto err_send;
 	}
+
+	/* No handler found */
+	if (!cmd_def->handler && !cmd_def->addr_handler) {
+		errstr = "No command handler";
+		goto err_send;
+	}
+
+	command_ctx.opmode = cmd_def->opmode;
+	/* ping has special response string */
+	if (cmd_def->opmode == OP_PING)
+		resultstr = "pong";
+
+	/* properly select the handler to be used (single-/double-parameter) */
+	if (cmd_def->addr_handler)
+		errstr = cmd_def->addr_handler(&command_ctx, addr);
+	else
+		errstr = cmd_def->handler(&command_ctx);
 
 	CH(homer_fill_values, hctx, &callid, command_ctx.opmode);
 	CH(homer_trace_msg_in, hctx, data);
@@ -935,7 +916,7 @@ send_resp:
 
 	release_closed_sockets();
 	log_info_pop_until(&callid);
-	CH(homer_trace_msg_out ,hctx, reply);
+	CH(homer_trace_msg_out, hctx, reply);
 }
 
 int control_ng_process(str *buf, const endpoint_t *sin, char *addr, const sockaddr_t *local,

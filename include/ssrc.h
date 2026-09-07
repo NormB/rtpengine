@@ -9,6 +9,7 @@
 #include "obj.h"
 #include "codeclib.h"
 #include "types.h"
+#include "ssrclib.h"
 
 #define MAX_SSRC_ENTRIES 20
 
@@ -17,16 +18,6 @@ struct ssrc_entry;
 struct ssrc_entry_call;
 enum ssrc_dir;
 
-typedef struct ssrc_entry *(*ssrc_create_func_t)(void *uptr);
-
-struct ssrc_hash {
-	GQueue nq;
-	mutex_t lock;
-	ssrc_create_func_t create_func;
-	void *uptr;
-	struct ssrc_entry *precreat; // next used entry
-	unsigned int iters; // tracks changes
-};
 struct payload_tracker {
 	mutex_t lock;
 	unsigned char last[32]; // must be <= 255
@@ -49,13 +40,6 @@ struct ssrc_stats_block {
 	uint64_t mos; // nominal range of 10 - 50 for MOS values 1.0 to 5.0
 };
 
-struct ssrc_entry {
-	struct obj obj;
-	GList link;
-	mutex_t lock;
-	uint32_t ssrc;
-};
-
 struct ssrc_entry_call {
 	struct ssrc_entry h; // must be first
 
@@ -69,6 +53,7 @@ struct ssrc_entry_call {
 	uint32_t ssrc_map_out;
 	uint16_t seq_out;
 	unsigned long ts_out;
+	bool seq_set;
 
 	// RTCP stats
 	struct ssrc_stats *stats;
@@ -77,7 +62,8 @@ struct ssrc_entry_call {
 	atomic64 last_sample,
 		 sample_packets,
 		 sample_octets,
-		 sample_packets_lost,
+		 sample_packets_lost, // local (sequence-gap based)
+		 sample_packets_lost_rtcp, // as reported via RTCP RR
 		 sample_duplicates;
 
 	int64_t next_rtcp; // for self-generated RTCP reports
@@ -95,7 +81,8 @@ struct ssrc_entry_call {
 	// input only - tracking for passthrough handling
 	uint32_t last_seq_tracked;
 	uint32_t lost_bits; // sliding bitfield, [0] = ext_seq
-	uint32_t packets_lost; // RTCP cumulative number of packets lost
+	uint32_t packets_lost; // locally measured (sequence-gap based) cumulative packets lost
+	uint32_t packets_lost_rtcp; // RTCP cumulative number of packets lost (RR)
 	uint32_t duplicates;
 
 	// for transcoding
@@ -193,18 +180,7 @@ struct crtt_args {
 };
 
 
-
-void ssrc_hash_destroy(struct ssrc_hash *);
-void ssrc_hash_foreach(struct ssrc_hash *, void (*)(void *, void *), void *);
-void ssrc_hash_full_init(struct ssrc_hash *, ssrc_create_func_t, void *uptr); // pre-creates one object
-void ssrc_hash_full_fast_init(struct ssrc_hash *, ssrc_create_func_t, void *uptr); // doesn't pre-create object
-
 void ssrc_hash_call_init(struct ssrc_hash *);
-
-void *get_ssrc_full(uint32_t, struct ssrc_hash *, bool *created); // creates new entry if not found
-INLINE void *get_ssrc(uint32_t ssrc, struct ssrc_hash *ht) {
-	return get_ssrc_full(ssrc, ht, NULL);
-}
 
 INLINE struct ssrc_entry_call *call_get_first_ssrc(struct ssrc_hash *ht) {
 	return ht->nq.head ? ht->nq.head->data : NULL;

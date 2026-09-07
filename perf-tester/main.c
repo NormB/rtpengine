@@ -15,7 +15,8 @@
 #include "poller.h"
 #include "ssllib.h"
 #include "obj.h"
-#include "fix_frame_channel_layout.h"
+#include "fix_frame_channel_layout.compat"
+#include "log.h"
 
 
 
@@ -311,7 +312,7 @@ static int got_packet(encoder_t *encoder, void *p1, void *p2) {
 
 static int got_frame(decoder_t *decoder, AVFrame *frame, void *p1, void *b) {
 	struct stream *s = p1;
-	encoder_input_fifo(s->encoder, frame, got_packet, s, NULL);
+	encoder_input_data(s->encoder, frame, got_packet, s, NULL);
 	av_frame_free(&frame);
 	return 0;
 }
@@ -376,7 +377,7 @@ static void readable(int fd, void *o) {
 			frame = STR_LEN(data->data, data->size);
 
 			if (!s->chain)
-				decoder_input_data(s->decoder, &frame, s->input_ts, got_frame, s, NULL);
+				decoder_input_data(s->decoder, &frame, s->input_ts, false, got_frame, s, NULL);
 			else {
 				AVPacket *pkt = codec_cc_input_data(s->chain, &frame, s->input_ts, s, NULL, NULL);
 				if (pkt) {
@@ -522,7 +523,7 @@ static void new_stream_params(
 				NULL, NULL, NULL);
 		assert(res == 0); // TODO: handle failures gracefully
 
-		s->decoder = decoder_new_fmtp(in_def, dec_format.clockrate, dec_format.channels, 20,
+		s->decoder = decoder_new_fmtp(in_def, &dec_format, 20,
 				&actual_enc_format, NULL, NULL, NULL); // TODO: support different options (fmtp etc)
 		assert(s->decoder != NULL); // TODO: handle failures gracefully
 	}

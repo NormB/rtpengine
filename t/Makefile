@@ -6,100 +6,76 @@ include ../lib/deps.Makefile
 
 with_transcoding ?= yes
 
-ifeq ($(origin CFLAGS),undefined)
-CFLAGS?=	-g -Wall -Wextra -Wno-sign-compare -Wno-unused-parameter -Wstrict-prototypes -Werror=return-type \
-		-Wshadow
-else
-CFLAGS:=	$(CFLAGS)
-endif
-PRELOAD_CFLAGS := $(CFLAGS)
-CFLAGS+=	-pthread
-CFLAGS+=	-std=c11
-CFLAGS+=	-I. -I../lib/ -I../kernel-module/ -I../include/
-CFLAGS+=	-D_GNU_SOURCE
-CFLAGS+=	$(CFLAGS_GLIB)
-CFLAGS+=	$(CFLAGS_GTHREAD)
-CFLAGS+=	$(CFLAGS_OPENSSL)
-CFLAGS+=	$(CFLAGS_LIBPCRE)
-CFLAGS+=	$(CFLAGS_LIBCURL)
-CFLAGS+=	$(CFLAGS_JSON_GLIB)
+include ../lib/flags.Makefile
+
+# The preload shims are loaded by the test harness into the test scripts' own
+# interpreter, so they must not carry the sanitizer runtime: in a sanitizer
+# build that crashes the daemon tests on aarch64 during library init. Everything
+# else in CFLAGS, the Debian hardening flags included, still applies to them.
+PRELOAD_CFLAGS := $(filter-out -fsanitize=%,$(CFLAGS))
+
+CFLAGS += -I$(top_srcdir)/include/
+CFLAGS += $(CFLAGS_GLIB)
+CFLAGS += $(CFLAGS_GTHREAD)
+CFLAGS += $(CFLAGS_OPENSSL)
+CFLAGS += $(CFLAGS_LIBPCRE)
+CFLAGS += $(CFLAGS_LIBCURL)
+CFLAGS += $(CFLAGS_JSON_GLIB)
+CFLAGS += $(CFLAGS_LIBIPTC)
 ifeq ($(with_transcoding),yes)
-CFLAGS+=	$(CFLAGS_LIBAVCODEC)
-CFLAGS+=	$(CFLAGS_LIBAVFORMAT)
-CFLAGS+=	$(CFLAGS_LIBAVUTIL)
-CFLAGS+=	$(CFLAGS_LIBSWRESAMPLE)
-CFLAGS+=	$(CFLAGS_LIBAVFILTER)
-CFLAGS+=	$(CFLAGS_SPANDSP)
-CFLAGS+=	$(CFLAGS_OPUS)
-CFLAGS+=	$(CFLAGS_LIBZ)
-CFLAGS+=	$(CFLAGS_LIBWEBSOCKETS)
-CFLAGS+=	$(CFLAGS_LIBEVENT)
-CFLAGS+=	-DWITH_TRANSCODING
+CFLAGS += $(CFLAGS_LIBAVCODEC)
+CFLAGS += $(CFLAGS_LIBAVFORMAT)
+CFLAGS += $(CFLAGS_LIBAVUTIL)
+CFLAGS += $(CFLAGS_LIBSWRESAMPLE)
+CFLAGS += $(CFLAGS_LIBSWSCALE)
+CFLAGS += $(CFLAGS_LIBAVFILTER)
+CFLAGS += $(CFLAGS_SPANDSP)
+CFLAGS += $(CFLAGS_OPUS)
+CFLAGS += $(CFLAGS_LIBZ)
+CFLAGS += $(CFLAGS_LIBWEBSOCKETS)
+CFLAGS += $(CFLAGS_LIBEVENT)
+CFLAGS += -DWITH_TRANSCODING
 ifeq ($(RTPENGINE_EXTENDED_TESTS),1)
-CFLAGS+=	-DWITH_AMR_TESTS
+CFLAGS += -DWITH_AMR_TESTS
 endif
-CFLAGS+=	$(CFLAGS_MYSQL)
+CFLAGS += $(CFLAGS_MYSQL)
 else
-CFLAGS+=	-DWITHOUT_CODECLIB
+CFLAGS += -DWITHOUT_CODECLIB
 endif
 
-LDLIBS:=	-lm -ldl
-LDLIBS+=	$(LDLIBS_GLIB)
-LDLIBS+=	$(LDLIBS_GTHREAD)
-LDLIBS+=	$(LDLIBS_LIBCRYPTO)
-LDLIBS+=	$(LDLIBS_OPENSSL)
-LDLIBS+=	$(LDLIBS_LIBPCRE)
-LDLIBS+=	$(LDLIBS_LIBCURL)
-LDLIBS+=	$(LDLIBS_JSON_GLIB)
+LDLIBS += $(LDLIBS_GLIB)
+LDLIBS += $(LDLIBS_GTHREAD)
+LDLIBS += $(LDLIBS_LIBCRYPTO)
+LDLIBS += $(LDLIBS_OPENSSL)
+LDLIBS += $(LDLIBS_LIBPCRE)
+LDLIBS += $(LDLIBS_LIBCURL)
+LDLIBS += $(LDLIBS_JSON_GLIB)
+LDLIBS += $(LDLIBS_LIBIPTC)
 ifeq ($(with_transcoding),yes)
-LDLIBS+=	$(LDLIBS_LIBAVCODEC)
-LDLIBS+=	$(LDLIBS_LIBAVFORMAT)
-LDLIBS+=	$(LDLIBS_LIBAVUTIL)
-LDLIBS+=	$(LDLIBS_LIBSWRESAMPLE)
-LDLIBS+=	$(LDLIBS_LIBAVFILTER)
-LDLIBS+=	$(LDLIBS_SPANDSP)
-LDLIBS+=	$(LDLIBS_OPUS)
-LDLIBS+=	$(LDLIBS_LIBZ)
-LDLIBS+=	$(LDLIBS_LIBWEBSOCKETS)
-LDLIBS+=	$(LDLIBS_LIBPCAP)
-LDLIBS+=	$(LDLIBS_LIBEVENT)
-LDLIBS+=	$(LDLIBS_LIBHIREDIS)
-LDLIBS+=	$(LDLIBS_MYSQL)
+LDLIBS += $(LDLIBS_LIBAVCODEC)
+LDLIBS += $(LDLIBS_LIBAVFORMAT)
+LDLIBS += $(LDLIBS_LIBAVUTIL)
+LDLIBS += $(LDLIBS_LIBSWRESAMPLE)
+LDLIBS += $(LDLIBS_LIBSWSCALE)
+LDLIBS += $(LDLIBS_LIBAVFILTER)
+LDLIBS += $(LDLIBS_SPANDSP)
+LDLIBS += $(LDLIBS_OPUS)
+LDLIBS += $(LDLIBS_LIBZ)
+LDLIBS += $(LDLIBS_LIBWEBSOCKETS)
+LDLIBS += $(LDLIBS_LIBPCAP)
+LDLIBS += $(LDLIBS_LIBEVENT)
+LDLIBS += $(LDLIBS_LIBHIREDIS)
+LDLIBS += $(LDLIBS_MYSQL)
+LDLIBS += $(LDLIBS_BCG729)
 endif
 
-CFLAGS+=	$(CFLAGS_CODEC_CHAIN)
-LDLIBS+=	$(LDLIBS_CODEC_CHAIN)
+CFLAGS += $(CFLAGS_CODEC_CHAIN)
+LDLIBS += $(LDLIBS_CODEC_CHAIN)
 
-SRCS=		test-bitstr.c aes-crypt.c aead-aes-crypt.c test-const_str_hash.strhash.c aead-decrypt.c
-LIBSRCS=	loglib.c auxlib.c str.c rtplib.c ssllib.c mix_buffer.c bufferpool.c bencode.c
-DAEMONSRCS=	crypto.c ssrc.c helpers.c rtp.c cli.strhash.c
+CFLAGS += $(CFLAGS_MQTT)
+LDLIBS += $(LDLIBS_MQTT)
 
-ifeq ($(with_transcoding),yes)
-SRCS+=		test-transcode.c test-dtmf-detect.c test-payload-tracker.c test-resample.c test-stats.c
-SRCS+=		spandsp_recv_fax_pcm.c spandsp_recv_fax_t38.c spandsp_send_fax_pcm.c \
-		spandsp_send_fax_t38.c test-mix-buffer.c
-ifeq ($(RTPENGINE_EXTENDED_TESTS),1)
-SRCS+=		test-amr-decode.c test-amr-encode.c
-endif
-LIBSRCS+=	codeclib.strhash.c resample.c socket.c streambuf.c dtmflib.c poller.c
-DAEMONSRCS+=	control_ng_flags_parser.c codec.c call.c ice.c kernel.c media_socket.c stun.c \
-		dtls.c recording.c statistics.c rtcp.c redis.c iptables.c graphite.c \
-		cookie_cache.c udp_listener.c homer.c load.c cdr.c dtmf.c timerthread.c \
-		media_player.c jitter_buffer.c t38.c tcp_listener.c mqtt.c websocket.c \
-		audio_player.c arena.c ng_client.c call_interfaces.strhash.c sdp.strhash.c \
-		janus.strhash.c control_ng.strhash.c
-LIBASM=		mvr2s_x64_avx2.S mvr2s_x64_avx512.S mix_in_x64_avx2.S mix_in_x64_avx512bw.S mix_in_x64_sse2.S
-endif
-ifneq ($(have_liburing),yes)
-LIBSRCS+=	uring.c
-endif
-
-SRCS+=		s3-auth.c
-LIBSRCS+=	s3utils.c
-
-SRCS+=		kernel-extmap-filter.c
-
-COMMONOBJS=	str.o auxlib.o rtplib.o loglib.o ssllib.o
+COMMONOBJS := ../lib/str.o ../lib/auxlib.o ../lib/rtplib.o ../lib/loglib.o ../lib/ssllib.o
 
 include ../lib/common.Makefile
 
@@ -111,19 +87,24 @@ include ../lib/common.Makefile
 	daemon-tests-templ-def daemon-tests-templ-def-offer daemon-tests-t38 daemon-tests-evs-dtx \
 	daemon-tests-transform daemon-tests-http daemon-tests-heuristic daemon-tests-asymmetric \
 	daemon-tests-dtx-no-shift daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext \
-	daemon-tests-bundle daemon-tests-dtls
+	daemon-tests-bundle daemon-tests-dtls daemon-tests-rollback \
+	daemon-tests-rollback-redis \
+	daemon-tests-recording daemon-tests-create daemon-tests-alias \
+	daemon-tests-kernel-api \
+	daemon-tests-video
 
-TESTS=		test-bitstr aes-crypt aead-aes-crypt test-const_str_hash.strhash
+TESTS := test-bitstr aes-crypt aead-aes-crypt test-const_str_hash.strhash
 ifeq ($(with_transcoding),yes)
-TESTS+=		test-transcode test-dtmf-detect test-payload-tracker test-resample test-stats test-mix-buffer
+TESTS += test-transcode test-dtmf-detect test-payload-tracker test-resample test-stats test-mix-buffer
+TESTS += test-sequencer
 ifeq ($(RTPENGINE_EXTENDED_TESTS),1)
-TESTS+=		test-amr-decode test-amr-encode
+TESTS += test-amr-decode test-amr-encode
 endif
 endif
-TESTS+=		s3-auth
+TESTS += s3-auth
 
-ADD_CLEAN=	tests-preload.so time-fudge-preload.so $(TESTS) aead-decrypt
-ADD_CLEAN+=	s3-auth
+ADD_CLEAN := tests-preload.so time-fudge-preload.so $(TESTS) aead-decrypt
+ADD_CLEAN += s3-auth
 
 ifeq ($(with_transcoding),yes)
 all-tests:	unit-tests daemon-tests
@@ -150,6 +131,7 @@ unit-tests:	$(TESTS) aead-decrypt kernel-extmap-filter
 daemon-tests: daemon-tests-main daemon-tests-jb daemon-tests-pubsub daemon-tests-websocket \
 	daemon-tests-evs daemon-tests-async-tc \
 	daemon-tests-audio-player daemon-tests-audio-player-play-media \
+	daemon-tests-record-egress-play-media \
 	daemon-tests-intfs daemon-tests-stats daemon-tests-player-cache daemon-tests-redis \
 	daemon-tests-rtpp-flags daemon-tests-redis-json daemon-tests-measure-rtp daemon-tests-mos-legacy \
 	daemon-tests-mos-fullband daemon-tests-config-file \
@@ -158,13 +140,27 @@ daemon-tests: daemon-tests-main daemon-tests-jb daemon-tests-pubsub daemon-tests
 	daemon-tests-sdp-orig-replacements daemon-tests-moh daemon-tests-evs-dtx daemon-tests-transform \
 	daemon-tests-transcode-config daemon-tests-codec-prefs daemon-tests-http daemon-tests-heuristic \
 	daemon-tests-asymmetric daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext \
-	daemon-tests-bundle daemon-tests-dtls
+	daemon-tests-bundle daemon-tests-dtls daemon-tests-rollback daemon-tests-rollback-redis \
+	daemon-tests-recording daemon-tests-create \
+	daemon-tests-dtx daemon-tests-dtx-cn daemon-tests-dtx-no-shift \
+	daemon-tests-alias \
+	daemon-tests-kernel-api \
+	daemon-tests-video
 
 daemon-test-deps:	tests-preload.so
 	$(MAKE) -C ../daemon
 
 daemon-tests-main:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests.pl
+
+daemon-tests-rollback:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-rollback.pl
+
+daemon-tests-rollback-redis:	daemon-test-deps
+	RTPE_REDIS_FORMAT=native ./auto-test-helper "$@-native" \
+		perl -I../perl auto-daemon-tests-rollback-redis.pl
+	RTPE_REDIS_FORMAT=json ./auto-test-helper "$@-json" \
+		perl -I../perl auto-daemon-tests-rollback-redis.pl
 
 daemon-tests-jb:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-jb.pl
@@ -186,6 +182,12 @@ daemon-tests-dtx-cn:	daemon-test-deps
 
 daemon-tests-pubsub:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-pubsub.pl
+
+daemon-tests-create:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-create.pl
+
+daemon-tests-alias:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-alias.pl
 
 daemon-tests-transform:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-transform.pl
@@ -228,6 +230,9 @@ daemon-tests-audio-player:	daemon-test-deps
 
 daemon-tests-audio-player-play-media:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-audio-player-play-media.pl
+
+daemon-tests-record-egress-play-media:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-record-egress-play-media.pl
 
 daemon-tests-rtpp-flags:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-rtpp-flags.pl
@@ -275,6 +280,9 @@ daemon-tests-t38:	daemon-test-deps spandsp_recv_fax_pcm spandsp_recv_fax_t38 \
 daemon-tests-evs-dtx:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-evs-dtx.pl
 
+daemon-tests-video:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-video.pl
+
 daemon-tests-codec-prefs:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-codec-prefs.pl
 
@@ -293,11 +301,38 @@ daemon-tests-bundle:	daemon-test-deps
 daemon-tests-dtls:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-dtls.pl
 
+daemon-tests-recording:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-recording.pl
+
+daemon-tests-kernel-api:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-kernel-api.pl
+
 test-bitstr:	test-bitstr.o
 
-test-mix-buffer:	test-mix-buffer.o $(COMMONOBJS) mix_buffer.o ssrc.o rtp.o crypto.o helpers.o \
-	mix_in_x64_avx2.o mix_in_x64_sse2.o mix_in_x64_avx512bw.o codeclib.strhash.o dtmflib.o \
-	mvr2s_x64_avx2.o mvr2s_x64_avx512.o resample.o bufferpool.o uring.o poller.o bencode.o
+test-mix-buffer:	test-mix-buffer.o \
+	$(COMMONOBJS) \
+	../daemon/crypto.o \
+	../daemon/helpers.o \
+	../daemon/rtp.o \
+	../daemon/ssrc.o \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/bufferpool.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/mix_buffer.o \
+	../lib/mix_in_x64_avx2.o \
+	../lib/mix_in_x64_avx512bw.o \
+	../lib/mix_in_x64_sse2.o \
+	../lib/mvr2s_x64_avx2.o \
+	../lib/mvr2s_x64_avx512.o \
+	../lib/poller.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	../lib/socket.o \
+	../lib/uring.o \
+	log.o
 
 spandsp_send_fax_pcm:	spandsp_send_fax_pcm.o
 
@@ -309,49 +344,223 @@ spandsp_recv_fax_t38:	spandsp_recv_fax_t38.o
 
 spandsp_raw_fax_tests: spandsp_send_fax_pcm spandsp_recv_fax_pcm spandsp_send_fax_t38 spandsp_recv_fax_t38
 
-test-amr-decode: test-amr-decode.o $(COMMONOBJS) codeclib.strhash.o resample.o dtmflib.o resample.o \
-	mvr2s_x64_avx2.o mvr2s_x64_avx512.o bencode.o
+test-amr-decode: test-amr-decode.o \
+	$(COMMONOBJS) \
+	../lib/amr.strhash.o \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/mvr2s_x64_avx2.o \
+	../lib/mvr2s_x64_avx512.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	log.o
 
-test-amr-encode: test-amr-encode.o $(COMMONOBJS) codeclib.strhash.o resample.o dtmflib.o \
-	mvr2s_x64_avx2.o mvr2s_x64_avx512.o bencode.o
+test-amr-encode: test-amr-encode.o \
+	$(COMMONOBJS) \
+	../lib/amr.strhash.o \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/mvr2s_x64_avx2.o \
+	../lib/mvr2s_x64_avx512.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	log.o
 
 test-dtmf-detect: test-dtmf-detect.o
 
-aes-crypt:	aes-crypt.o $(COMMONOBJS) crypto.o bencode.o
+aes-crypt:	aes-crypt.o $(COMMONOBJS) ../daemon/crypto.o ../lib/bencode.o log.o
 
-aead-decrypt:	aead-decrypt.o $(COMMONOBJS) crypto.o rtp.o bencode.o
+aead-decrypt:	aead-decrypt.o $(COMMONOBJS) ../daemon/crypto.o ../daemon/rtp.o ../lib/bencode.o log.o
 
-aead-aes-crypt:	aead-aes-crypt.o $(COMMONOBJS) crypto.o bencode.o
+aead-aes-crypt:	aead-aes-crypt.o $(COMMONOBJS) ../daemon/crypto.o ../lib/bencode.o log.o
 
-test-stats:	test-stats.o $(COMMONOBJS) codeclib.strhash.o resample.o codec.o ssrc.o call.o ice.o helpers.o \
-	kernel.o media_socket.o stun.o bencode.o socket.o poller.o dtls.o recording.o statistics.o \
-	rtcp.o redis.o iptables.o graphite.o call_interfaces.strhash.o sdp.strhash.o rtp.o crypto.o \
-	control_ng_flags_parser.o control_ng.strhash.o graphite.o \
-	streambuf.o cookie_cache.o udp_listener.o homer.o load.o cdr.o dtmf.o timerthread.o \
-	media_player.o jitter_buffer.o dtmflib.o t38.o tcp_listener.o mqtt.o janus.strhash.o \
-	websocket.o cli.strhash.o mvr2s_x64_avx2.o mvr2s_x64_avx512.o audio_player.o mix_buffer.o \
-	mix_in_x64_avx2.o mix_in_x64_sse2.o mix_in_x64_avx512bw.o bufferpool.o uring.o arena.o ng_client.o
+test-stats:	test-stats.o \
+	$(COMMONOBJS) \
+	../daemon/arena.o \
+	../daemon/audio_player.o \
+	../daemon/call_flags.strhash.o \
+	../daemon/call_interfaces.o \
+	../daemon/call.o \
+	../daemon/cdr.o \
+	../daemon/cli.strhash.o \
+	../daemon/codec.o \
+	../daemon/control_ng_flags_parser.o \
+	../daemon/control_ng.o \
+	../daemon/cookie_cache.o \
+	../daemon/crypto.o \
+	../daemon/dtls.o  \
+	../daemon/dtmf.o \
+	../daemon/graphite.o \
+	../daemon/graphite.o \
+	../daemon/helpers.o \
+	../daemon/homer.o \
+	../daemon/ice.o \
+	../daemon/iptables.o \
+	../daemon/janus.strhash.o \
+	../daemon/jitter_buffer.o \
+	../daemon/kernel.o \
+	../daemon/load.o \
+	../daemon/media_player.o \
+	../daemon/media_socket.o \
+	../daemon/mqtt.o \
+	../daemon/ng_client.o \
+	../daemon/recording.o \
+	../daemon/redis.o \
+	../daemon/rtcp.o \
+	../daemon/rtp.o \
+	../daemon/sdp.strhash.o \
+	../daemon/ssrc.o \
+	../daemon/statistics.o \
+	../daemon/stun.o \
+	../daemon/t38.o \
+	../daemon/tcp_listener.o \
+	../daemon/timerthread.o \
+	../daemon/udp_listener.o \
+	../daemon/websocket.o \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/bufferpool.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/mix_buffer.o \
+	../lib/mix_in_x64_avx2.o \
+	../lib/mix_in_x64_avx512bw.o \
+	../lib/mix_in_x64_sse2.o \
+	../lib/mvr2s_x64_avx2.o \
+	../lib/mvr2s_x64_avx512.o \
+	../lib/poller.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	../lib/socket.o \
+	../lib/streambuf.o \
+	../lib/uring.o \
+	log.o
 
-test-transcode:	test-transcode.o $(COMMONOBJS) codeclib.strhash.o resample.o codec.o ssrc.o call.o ice.o helpers.o \
-	kernel.o media_socket.o stun.o bencode.o socket.o poller.o dtls.o recording.o statistics.o \
-	rtcp.o redis.o iptables.o graphite.o call_interfaces.strhash.o sdp.strhash.o rtp.o crypto.o \
-	control_ng_flags_parser.o control_ng.strhash.o \
-	streambuf.o cookie_cache.o udp_listener.o homer.o load.o cdr.o dtmf.o timerthread.o \
-	media_player.o jitter_buffer.o dtmflib.o t38.o tcp_listener.o mqtt.o janus.strhash.o websocket.o \
-	cli.strhash.o mvr2s_x64_avx2.o mvr2s_x64_avx512.o audio_player.o mix_buffer.o \
-	mix_in_x64_avx2.o mix_in_x64_sse2.o mix_in_x64_avx512bw.o bufferpool.o uring.o arena.o ng_client.o
+test-transcode:	test-transcode.o \
+	$(COMMONOBJS) \
+	../daemon/arena.o \
+	../daemon/audio_player.o \
+	../daemon/call_flags.strhash.o \
+	../daemon/call_interfaces.o \
+	../daemon/call.o \
+	../daemon/cdr.o \
+	../daemon/cli.strhash.o \
+	../daemon/codec.o \
+	../daemon/control_ng_flags_parser.o \
+	../daemon/control_ng.o \
+	../daemon/cookie_cache.o \
+	../daemon/crypto.o \
+	../daemon/dtls.o \
+	../daemon/dtmf.o \
+	../daemon/graphite.o \
+	../daemon/helpers.o \
+	../daemon/homer.o \
+	../daemon/ice.o \
+	../daemon/iptables.o \
+	../daemon/janus.strhash.o \
+	../daemon/jitter_buffer.o \
+	../daemon/kernel.o \
+	../daemon/load.o \
+	../daemon/media_player.o \
+	../daemon/media_socket.o \
+	../daemon/mqtt.o \
+	../daemon/ng_client.o \
+	../daemon/recording.o \
+	../daemon/redis.o \
+	../daemon/rtcp.o \
+	../daemon/rtp.o \
+	../daemon/sdp.strhash.o \
+	../daemon/ssrc.o \
+	../daemon/statistics.o \
+	../daemon/stun.o \
+	../daemon/t38.o \
+	../daemon/tcp_listener.o \
+	../daemon/timerthread.o \
+	../daemon/udp_listener.o \
+	../daemon/websocket.o \
+	../lib/amr.strhash.o \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/bufferpool.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/g711.o \
+	../lib/g722.o \
+	../lib/gsm.o \
+	../lib/mix_buffer.o \
+	../lib/mix_in_x64_avx2.o \
+	../lib/mix_in_x64_avx512bw.o \
+	../lib/mix_in_x64_sse2.o \
+	../lib/mvr2s_x64_avx2.o \
+	../lib/mvr2s_x64_avx512.o \
+	../lib/opus.strhash.o \
+	../lib/poller.o \
+	../lib/pseudo.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	../lib/socket.o \
+	../lib/streambuf.o \
+	../lib/uring.o \
+	log.o
 
-test-resample:	test-resample.o $(COMMONOBJS) codeclib.strhash.o resample.o dtmflib.o mvr2s_x64_avx2.o \
-	mvr2s_x64_avx512.o bencode.o
+test-sequencer:	test-sequencer.o \
+	$(COMMONOBJS) \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	log.o
 
-test-payload-tracker: test-payload-tracker.o $(COMMONOBJS) ssrc.o helpers.o auxlib.o rtp.o crypto.o codeclib.strhash.o \
-	resample.o dtmflib.o mvr2s_x64_avx2.o mvr2s_x64_avx512.o bufferpool.o uring.o poller.o bencode.o
+test-resample:	test-resample.o \
+	$(COMMONOBJS) \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/mvr2s_x64_avx2.o \
+	../lib/mvr2s_x64_avx512.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	log.o
 
-test-kernel-module: test-kernel-module.o $(COMMONOBJS) kernel.o
+test-payload-tracker: test-payload-tracker.o \
+	$(COMMONOBJS) \
+	../daemon/crypto.o \
+	../daemon/helpers.o \
+	../daemon/rtp.o \
+	../daemon/ssrc.o \
+	../lib/avc.o \
+	../lib/bencode.o \
+	../lib/bufferpool.o \
+	../lib/cchain.o \
+	../lib/codeclib.o \
+	../lib/dtmflib.o \
+	../lib/mvr2s_x64_avx2.o \
+	../lib/mvr2s_x64_avx512.o \
+	../lib/poller.o \
+	../lib/resample.o \
+	../lib/rescale.o \
+	../lib/socket.o \
+	../lib/uring.o \
+	log.o
 
-test-const_str_hash.strhash: test-const_str_hash.strhash.o $(COMMONOBJS) bencode.o
+test-kernel-module: test-kernel-module.o $(COMMONOBJS) ../daemon/kernel.o
 
-s3-auth:	s3-auth.o s3utils.o
+test-const_str_hash.strhash: test-const_str_hash.strhash.o $(COMMONOBJS) ../lib/bencode.o log.o
+
+s3-auth:	s3-auth.o ../lib/s3utils.o
 
 kernel-extmap-filter:	kernel-extmap-filter.o
 
@@ -359,12 +568,16 @@ PRELOAD_CFLAGS += -D_GNU_SOURCE -std=c11
 PRELOAD_LIBS += -ldl
 
 tests-preload.so:	tests-preload.c
-	$(CC) $(PRELOAD_CFLAGS) -o $@ -shared -fPIC $< $(PRELOAD_LIBS)
+	$(CC) $(PRELOAD_CFLAGS) ${CFLAGS_DEFAULT} ${CPPFLAGS_DEFAULT} -o $@ -shared -fPIC $(LDFLAGS_DEFAULT) $< $(PRELOAD_LIBS)
 
 time-fudge-preload.so:	time-fudge-preload.c
-	$(CC) $(PRELOAD_CFLAGS) -o $@ -shared -fPIC $< $(PRELOAD_LIBS)
+	$(CC) $(PRELOAD_CFLAGS) ${CFLAGS_DEFAULT} ${CPPFLAGS_DEFAULT} -o $@ -shared -fPIC $(LDFLAGS_DEFAULT) $< $(PRELOAD_LIBS)
 
-spandsp_send_fax_pcm.c:	../lib/spandsp_logging.h
-spandsp_send_fax_t38.c:	../lib/spandsp_logging.h
-spandsp_recv_fax_t38.c:	../lib/spandsp_logging.h
-spandsp_recv_fax_pcm.c:	../lib/spandsp_logging.h
+spandsp_send_fax_pcm.c:	../lib/spandsp_logging.compat
+spandsp_send_fax_t38.c:	../lib/spandsp_logging.compat
+spandsp_recv_fax_t38.c:	../lib/spandsp_logging.compat
+spandsp_recv_fax_pcm.c:	../lib/spandsp_logging.compat
+
+../lib/codeclib.o: ../lib/fix_frame_channel_layout.compat
+
+../lib/avc.o: ../lib/fix_frame_channel_layout.compat

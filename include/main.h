@@ -63,6 +63,8 @@ enum endpoint_learning {
 	X(num_threads) \
 	X(media_num_threads) \
 	X(codec_num_threads) \
+	X(kernel_num_threads) \
+	X(kernel_slots) \
 	X(nftables_family) \
 	X(load_limit) \
 	X(cpu_limit) \
@@ -90,7 +92,6 @@ enum endpoint_learning {
 	X(db_refresh) \
 	X(cache_refresh) \
 	X(expiry_timer) \
-	X(cache_expire) \
 	X(timer_accuracy) \
 	X(ng_client_timeout) \
 	X(ng_client_retries) \
@@ -104,8 +105,9 @@ enum endpoint_learning {
 	X(final_timeout_us) \
 	X(offer_timeout_us) \
 	X(delete_delay_us) \
-	X(media_expire_us) \
-	X(db_expire_us) \
+	X(media_files_expire_us) \
+	X(db_cache_expire_us) \
+	X(db_media_expire_us) \
 	X(rtcp_interval_us) \
 	X(redis_disable_time_us) \
 	X(mqtt_publish_interval_us) \
@@ -123,6 +125,7 @@ enum endpoint_learning {
 	X(no_redis_required) \
 	X(active_switchover) \
 	X(rec_egress) \
+	X(rec_both) \
 	X(xtables) \
 	X(nftables_append) \
 	X(log_keys) \
@@ -220,7 +223,8 @@ enum endpoint_learning {
 	X(dtls_signature) \
 	X(use_audio_player) \
 	X(mqtt_publish_scope) \
-	X(mos)
+	X(mos) \
+	X(ssrc_reporting) \
 
 struct rtpengine_config {
 	rwlock_t		keyspaces_lock;
@@ -303,6 +307,12 @@ RTPE_CONFIG_CHARPP_PARAMS
 		MOS_CQ = 0,
 		MOS_LQ,
 	}			mos;
+	enum {
+		SRP_FULL = 0x0, // none disabled
+		SRP_INLINE = 0x1, // global (0x1) disabled - shall become the default in a future version
+		SRP_GLOBAL = 0x2, // inline (0x2) disabled
+		SRP_NONE = 0x3, // both disabled
+	}			ssrc_reporting;
 };
 
 
@@ -334,6 +344,7 @@ extern GQueue rtpe_control_ng;
 extern GQueue rtpe_control_ng_tcp;
 
 extern struct bufferpool *shm_bufferpool;
+extern struct bufferpool *static_bufferpool;
 extern struct bufferpool *rtpe_bufferpool;
 extern memory_arena_t rtpe_arena;
 

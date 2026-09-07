@@ -40,10 +40,13 @@ struct rtpengine_common_config {
 	int max_log_line_length;
 	int mos_type;				// enum in codec_def_t
 	char *evs_lib_path;
+	int video_pkt_size;
 	char *codec_chain_lib_path;
 	int codec_chain_runners;
 	int codec_chain_concurrency;
 	int codec_chain_async;
+	gboolean codec_chain_nonblock;
+	int codec_chain_interval;
 	int codec_chain_opus_application;
 	int codec_chain_opus_complexity;
 };
@@ -151,6 +154,11 @@ INLINE gboolean c_str_equal(const char *a, const char *b) {
 INLINE void add_c_str_to_ht(const char *key, char *value, charp_ht ht) {
 	t_hash_table_insert(ht, g_strdup(key), value); // hash table takes ownership of both
 }
+
+#define rtpe_snprintf(o, l, f, ...) ({ \
+	ssize_t __r = snprintf(o, l, f, ##__VA_ARGS__); \
+	__r >= 0 ? MIN((l) - 1, __r) : (l) - 1; \
+})
 
 /*** MUTEX ABSTRACTION ***/
 

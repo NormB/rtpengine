@@ -14,8 +14,7 @@
 
 #include "poller.h"
 #include "helpers.h"
-#include "log.h"
-#include "log_funcs.h"
+#include "log_d.h"
 #include "call.h"
 #include "socket.h"
 #include "redis.h"
@@ -526,7 +525,8 @@ RTPE_CONFIG_ENDPOINT_QUEUE_PARAMS
 static void cli_incoming_params_diff(str *instr, struct cli_writer *cw, const cli_handler_t *handler) {
 #define ll(system, descr) \
 	int_diff_print(common.log_levels[log_level_index_ ## system], "log-level-" #system);
-#include "loglevels.h"
+#include "loglevels_common.inc"
+#include "loglevels_d.inc"
 #undef ll
 
 #define X(v, n) \
@@ -537,7 +537,8 @@ SETTABLE_OPTIONS
 static void cli_incoming_params_revert(str *instr, struct cli_writer *cw, const cli_handler_t *handler) {
 #define ll(system, descr) \
 	int_revert(common.log_levels[log_level_index_ ## system], "log-level-" #system);
-#include "loglevels.h"
+#include "loglevels_common.inc"
+#include "loglevels_d.inc"
 #undef ll
 
 #define X(v, n) \
@@ -690,7 +691,13 @@ static void cli_list_call_info(struct cli_writer *cw, call_t *c) {
 
 	cw->cw_printf(cw,
 			 "\n"
-			 "callid: %s\n"
+			 "callid: " STR_FORMAT "\n",
+			 STR_FMT(&c->callid));
+
+	for (auto_iter(l, c->callid_aliases.head); l; l = l->next)
+		cw->cw_printf(cw, "alias: " STR_FORMAT "\n", STR_FMT(l->data));
+
+	cw->cw_printf(cw,
 			 "deletionmark: %s\n"
 			 "created: %" PRId64 "\n"
 			 "proxy: " STR_FORMAT "\n"
@@ -701,7 +708,7 @@ static void cli_list_call_info(struct cli_writer *cw, call_t *c) {
 			 "foreign: %s\n"
 			 "recording: %s\n"
 			 "\n",
-			 c->callid.s, c->ml_deleted_us ? "yes" : "no", c->created / 1000000,
+			 c->ml_deleted_us ? "yes" : "no", c->created / 1000000,
 			 STR_FMT(&c->created_from),
 			 (unsigned int) c->tos, c->last_signal_us / 1000000L, c->redis_hosted_db,
 			 atomic64_get_na(&c->last_redis_update_us),
@@ -758,8 +765,8 @@ static void cli_list_tag_info(struct cli_writer *cw, struct call_monologue *ml) 
 			if (!sub_media)
 				continue;
 
-			cw->cw_printf(cw, "---     subscribed to media with monologue tag '" STR_FORMAT_M "' (index: %d)\n",
-					STR_FMT_M(&ms->monologue->tag), sub_media->index);
+			cw->cw_printf(cw, "---     subscribed to media with monologue tag '" STR_FORMAT "' (index: %d)\n",
+					STR_FMT(&ms->monologue->tag), sub_media->index);
 		}
 
 		IQUEUE_FOREACH(&media->media_subscribers, ms) {
@@ -767,8 +774,8 @@ static void cli_list_tag_info(struct cli_writer *cw, struct call_monologue *ml) 
 			if (!sub_media)
 				continue;
 
-			cw->cw_printf(cw, "---     subscription of media with monologue tag '" STR_FORMAT_M "' (index: %d)\n",
-					STR_FMT_M(&ms->monologue->tag), sub_media->index);
+			cw->cw_printf(cw, "---     subscription of media with monologue tag '" STR_FORMAT "' (index: %d)\n",
+					STR_FMT(&ms->monologue->tag), sub_media->index);
 		}
 	}
 
@@ -1940,7 +1947,7 @@ static void cli_incoming_media_add_db(str *instr, struct cli_writer *cw, const c
 		return ;
 	}
 
-	unsigned long long id = str_to_ui(instr, 0);
+	unsigned long long id = str_to_ull(instr, 0);
 	if (id == 0 || id == ULLONG_MAX)
 		cw->cw_printf(cw, "Invalid ID '" STR_FORMAT "'\n", STR_FMT(instr));
 	else {
@@ -1958,7 +1965,7 @@ static void cli_incoming_media_reload_db(str *instr, struct cli_writer *cw, cons
 		return ;
 	}
 
-	unsigned long long id = str_to_ui(instr, 0);
+	unsigned long long id = str_to_ull(instr, 0);
 	if (id == 0 || id == ULLONG_MAX)
 		cw->cw_printf(cw, "Invalid ID '" STR_FORMAT "'\n", STR_FMT(instr));
 	else {
@@ -1981,7 +1988,7 @@ static void cli_incoming_media_add_cache(str *instr, struct cli_writer *cw, cons
 		return ;
 	}
 
-	unsigned long long id = str_to_ui(instr, 0);
+	unsigned long long id = str_to_ull(instr, 0);
 	if (id == 0 || id == ULLONG_MAX)
 		cw->cw_printf(cw, "Invalid ID '" STR_FORMAT "'\n", STR_FMT(instr));
 	else {
@@ -1999,7 +2006,7 @@ static void cli_incoming_media_reload_cache(str *instr, struct cli_writer *cw, c
 		return ;
 	}
 
-	unsigned long long id = str_to_ui(instr, 0);
+	unsigned long long id = str_to_ull(instr, 0);
 	if (id == 0 || id == ULLONG_MAX)
 		cw->cw_printf(cw, "Invalid ID '" STR_FORMAT "'\n", STR_FMT(instr));
 	else {
@@ -2042,7 +2049,7 @@ static void cli_incoming_media_evict_db(str *instr, struct cli_writer *cw, const
 
 	str token;
 	while (str_token_sep(&token, instr, ' ')) {
-		unsigned long long id = str_to_ui(&token, 0);
+		unsigned long long id = str_to_ull(&token, 0);
 		if (id == 0 || id == ULLONG_MAX)
 			cw->cw_printf(cw, "Invalid ID '" STR_FORMAT "'\n", STR_FMT(&token));
 		else {
@@ -2090,7 +2097,7 @@ static void cli_incoming_media_evict_cache(str *instr, struct cli_writer *cw, co
 
 	str token;
 	while (str_token_sep(&token, instr, ' ')) {
-		unsigned long long id = str_to_ui(&token, 0);
+		unsigned long long id = str_to_ull(&token, 0);
 		if (id == 0 || id == ULLONG_MAX)
 			cw->cw_printf(cw, "Invalid ID '" STR_FORMAT "'\n", STR_FMT(&token));
 		else {
@@ -2127,8 +2134,8 @@ static size_t ng_printf(struct cli_writer *cw, const char *fmt, ...) {
 
 const char *cli_ng(ng_command_ctx_t *ctx) {
 	__auto_type parser = ctx->parser_ctx.parser;
-	str body;
-	if (!parser->dict_get_str(ctx->req, "body", &body))
+	str body = parser->dict_get_str(ctx->req, "body");
+	if (!body.len)
 		return "No 'body' in message";
 
 	g_autoptr(GString) response = g_string_new("");

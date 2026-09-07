@@ -61,13 +61,12 @@ enum message_type {
 		 || (opmode == OP_BLOCK_DTMF || opmode == OP_UNBLOCK_DTMF)                       \
 		 || (opmode == OP_BLOCK_MEDIA || opmode == OP_UNBLOCK_MEDIA)                     \
 		 || (opmode == OP_SILENCE_MEDIA || opmode == OP_UNSILENCE_MEDIA)                 \
-		 || (opmode == OP_BLOCK_SILENCE_MEDIA || opmode == OP_UNBLOCK_SILENCE_MEDIA)     \
 		 || (opmode == OP_PLAY_MEDIA || opmode == OP_STOP_MEDIA)                         \
 		 || (opmode == OP_START_FORWARDING || opmode == OP_STOP_FORWARDING)              \
 		 || (opmode == OP_UNSUBSCRIBE || opmode == OP_START_RECORDING)                   \
 		 || (opmode == OP_STOP_RECORDING || opmode == OP_PAUSE_RECORDING)                \
 		 || (opmode == OP_INJECT_START || opmode == OP_INJECT_STOP)                      \
-		 || (opmode == OP_OTHER))
+		 || (opmode == OP_ROLLBACK || opmode == OP_OTHER))
 
 #define IS_OP_DIRECTIONAL(opmode)                                                                \
 		 ((opmode == OP_BLOCK_DTMF || opmode == OP_BLOCK_MEDIA)                          \
@@ -115,7 +114,7 @@ enum {
 #endif
 
 #define IS_FOREIGN_CALL(c) CALL_ISSET(c, FOREIGN)
-#define IS_OWN_CALL(c) !IS_FOREIGN_CALL(c)
+#define IS_OWN_CALL(c) (!IS_FOREIGN_CALL(c))
 
 /* flags shared by several of the structs below */
 #define SHARED_FLAG_IMPLICIT_RTCP		(1LL <<  0)
@@ -137,6 +136,7 @@ enum {
 /* empty range [16 - 29] in-between for non-shared flags */
 #define SHARED_FLAG_END_OF_CANDIDATES		(1LL << 30)
 #define SHARED_FLAG_EXTMAP_SHORT		(1LL << 39)
+#define SHARED_FLAG_ICE2			(1LL << 42)
 
 /* struct stream_params */
 #define SP_FLAG_IMPLICIT_RTCP			SHARED_FLAG_IMPLICIT_RTCP
@@ -157,6 +157,7 @@ enum {
 #define SP_FLAG_LEGACY_OSRTP_REV		SHARED_FLAG_LEGACY_OSRTP_REV
 #define SP_FLAG_END_OF_CANDIDATES		SHARED_FLAG_END_OF_CANDIDATES
 #define SP_FLAG_EXTMAP_SHORT			SHARED_FLAG_EXTMAP_SHORT
+#define SP_FLAG_ICE2				SHARED_FLAG_ICE2
 
 /* struct packet_stream */
 #define PS_FLAG_RTP				(1LL << 16)
@@ -172,7 +173,6 @@ enum {
 #define PS_FLAG_FINGERPRINT_VERIFIED		(1LL << 25)
 #define PS_FLAG_STRICT_SOURCE			SHARED_FLAG_STRICT_SOURCE
 #define PS_FLAG_MEDIA_HANDOVER			SHARED_FLAG_MEDIA_HANDOVER
-#define PS_FLAG_ICE				SHARED_FLAG_ICE
 #define PS_FLAG_ZERO_ADDR			(1LL << 26)
 #define PS_FLAG_PIERCE_NAT			(1LL << 27)
 #define PS_FLAG_NAT_WAIT			(1LL << 28)
@@ -221,6 +221,8 @@ enum {
 #define MEDIA_FLAG_PUBLIC			(1LL << 38)
 #define MEDIA_FLAG_EXTMAP_SHORT			SHARED_FLAG_EXTMAP_SHORT
 #define MEDIA_FLAG_BUNDLE_ONLY			(1LL << 40)
+#define MEDIA_FLAG_AUDIO_PLAYER_IMPLICIT	(1LL << 41)
+#define MEDIA_FLAG_ICE2				SHARED_FLAG_ICE2
 
 /* struct call_monologue */
 #define ML_FLAG_REC_FORWARDING			(1LL << 16)
@@ -330,7 +332,6 @@ struct media_subscription;
 
 
 
-TYPED_GHASHTABLE(codecs_ht, void, rtp_payload_type, g_direct_hash, g_direct_equal, NULL, NULL)
 TYPED_GHASHTABLE(codec_names_ht, str, GQueue, str_case_hash, str_case_equal, str_free, g_queue_free)
 TYPED_GHASHTABLE_LOOKUP_INSERT(codec_names_ht, str_free, g_queue_new)
 TYPED_DIRECT_FUNCS(media_direct_hash, media_direct_eq, struct call_media)
@@ -382,7 +383,7 @@ struct stream_params {
 	struct t38_options	t38_options;
 	str			tls_id;
 	int			media_sdp_id;
-	struct session_bandwidth media_session_bandiwdth;
+	struct session_bandwidth media_session_bandwidth;
 	str			sdp_information;
 	extmap_q		extmap;
 	str			label;
@@ -400,6 +401,7 @@ struct endpoint_map {
 struct loop_protector {
 	unsigned int		len;
 	unsigned char		buf[RTP_LOOP_PROTECT];
+	int64_t			recv_us;
 };
 
 
@@ -464,8 +466,8 @@ struct packet_stream {
 };
 
 INLINE int64_t packet_stream_last_packet(const struct packet_stream *ps) {
-	uint64_t lp1 = atomic64_get_na(&ps->last_packet_us);
-	uint64_t lp2 = atomic64_get_na(&ps->stats_in->last_packet_us);
+	int64_t lp1 = (int64_t)atomic64_get_na(&ps->last_packet_us);
+	int64_t lp2 = (int64_t)atomic64_get_na(&ps->stats_in->last_packet_us);
 	return MAX(lp1, lp2);
 }
 
@@ -491,6 +493,13 @@ struct media_subscription {
 };
 
 typedef IQUEUE(struct media_subscription, link) subscription_q;
+
+enum {
+	MP_DEFAULT = 0,
+	MP_REC,
+
+	MP_COUNT
+};
 
 
 
@@ -556,11 +565,12 @@ struct call_media {
 	struct t38_gateway	*t38_gateway;
 	struct audio_player	*audio_player;
 	struct codec_handler	*t38_handler;
+	struct media_player	*players[MP_COUNT];
 
 	unsigned int		buffer_delay;
 
-	/* media subsriptions handling */
-	subscription_ht		media_subscriptions_ht;		/* for quick lookup of our subsriptions */
+	/* media subscriptions handling */
+	subscription_ht		media_subscriptions_ht;		/* for quick lookup of our subscriptions */
 	subscription_ht		media_subscribers_ht;		/* for quick lookup of medias subscribed to us */
 	subscription_q		media_subscribers;		/* who is subscribed to this media (sinks) */
 	subscription_q		media_subscriptions;		/* who am I subscribed to (sources) */
@@ -590,8 +600,6 @@ struct call_media {
 };
 
 TYPED_GPTRARRAY(medias_arr, struct call_media)
-TYPED_GQUEUE(medias, struct call_media)
-G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(medias_q, medias_q_clear)
 
 
 /**
@@ -605,7 +613,8 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(medias_q, medias_q_clear)
  * A regular A/B call has two call_monologue objects with each subscribed to the other.
  */
 struct call_monologue {
-	call_t		*call;			/* RO */
+	call_t			*call;			/* RO */
+	str			call_id;		// RO - in case of merged calls with ID aliases
 	unsigned int		unique_id;		/* RO */
 
 	str			tag;
@@ -624,10 +633,12 @@ struct call_monologue {
 	GHashTable		*subscribers_ht;	/* for quick lookup */
 	medias_arr		*medias;
 	media_id_ht		media_ids;
-	struct media_player	*player;
-	struct media_player	*rec_player;
 	struct session_bandwidth sdp_session_bandwidth;
 	GString			*last_out_sdp;
+
+	// for media players
+	struct call_media	*audio;
+	struct call_media	*video;
 
 	sdp_origin		sdp_orig_in;	/* actual origin belonging to this monologue */
 	sdp_origin		sdp_orig_out;	/* previously used origin by other other side */
@@ -668,10 +679,10 @@ struct call_monologue {
 	str moh_file;
 
 	atomic64		ml_flags;
+
+	struct call_checkpoint	*checkpoint;
 };
 
-TYPED_GQUEUE(monologues, struct call_monologue)
-G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(monologues_q, monologues_q_clear)
 TYPED_GHASHTABLE(str_ml_ht, str, struct call_monologue, str_hash, str_equal, NULL, NULL)
 
 struct sdp_fragment;
@@ -843,15 +854,25 @@ extern __thread call_t *call_memory_arena;
 int call_init(void);
 void call_free(void);
 
-struct call_monologue *__monologue_create(call_t *call);
+__attribute__((nonnull(1, 2)))
+struct call_monologue *__monologue_create(call_t *call, const str *callid);
+
 void __monologue_free(struct call_monologue *m);
 void __monologue_tag(struct call_monologue *ml, const str *tag);
 void __monologue_viabranch(struct call_monologue *ml, const str *viabranch);
 struct packet_stream *__packet_stream_new(call_t *call);
+
 __attribute__((nonnull(1, 2)))
-struct media_subscription *__add_media_subscription(struct call_media * which, struct call_media * to,
+struct media_subscription *add_media_subscription(struct call_media * which, struct call_media * to,
 		const struct sink_attrs *attrs);
-bool __unsubscribe_media(struct call_media * which, struct call_media * from);
+
+__attribute__((nonnull(1, 2)))
+bool unsubscribe_media(struct call_media *which, struct call_media *from);
+__attribute__((nonnull(1)))
+void unsubscribe_monologue_from_all(struct call_monologue *ml);
+__attribute__((nonnull(1)))
+void unsubscribe_all_from_monologue(struct call_monologue *ml);
+
 struct media_subscription *call_ml_get_top_ms(struct call_monologue *ml);
 bool call_ml_sendonly_inactive(struct call_monologue *ml);
 struct media_subscription *call_media_get_top_ms(struct call_media *cm);
@@ -871,55 +892,104 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(subscription_q, media_subscriptions_clear)
 call_t *call_get_or_create(const str *callid, bool exclusive);
 call_t *call_get_opmode(const str *callid, enum ng_opmode opmode);
 void call_make_own_foreign(call_t *c, bool foreign);
-int call_get_mono_dialogue(struct call_monologue *monologues[2], call_t *call,
+
+__attribute__((nonnull(1, 2, 3, 4)))
+int call_get_mono_dialogue(struct call_monologue *monologues[2],
+		call_t *call,
+		const str *callid,
 		const str *fromtag,
 		const str *totag,
 		const str *viabranch,
 		sdp_ng_flags *, const endpoint_t *);
+
 struct call_monologue *call_get_monologue(call_t *call, const str *fromtag);
-struct call_monologue *call_get_or_create_monologue(call_t *call, const str *fromtag);
+
+__attribute__((nonnull(1, 2, 3)))
+struct call_monologue *call_get_or_create_monologue(call_t *call, const str *callid, const str *fromtag);
+
 __attribute__((nonnull(1, 2, 4, 5, 6)))
 struct call_media *call_make_transform_media(struct call_monologue *ml, const str *type, enum media_type type_id,
 		const str *media_id, const endpoint_t *remote, const str *interface);
+
 __attribute__((nonnull(1)))
 call_t *call_get(const str *callid);
-typedef enum { CG2_OK, CG2_NF1, CG2_NF2, CG2_SAME } call_get2_ret_t;
-__attribute__((nonnull(1, 2, 3, 4)))
-call_get2_ret_t call_get2(call_t **, call_t **, const str *, const str *);
-__attribute__((nonnull(1, 2)))
-bool call_merge(call_t *, call_t **);
+__attribute__((nonnull(1)))
+call_q calls_get(const str_q *);
+__attribute__((nonnull(1)))
+call_t *calls_merge(call_q *);
 __attribute__((nonnull(2, 3)))
 int monologue_offer_answer(struct call_monologue *monologues[2], sdp_streams_q *streams, sdp_ng_flags *flags);
 __attribute__((nonnull(1, 2, 3, 4)))
 void codecs_offer_answer(struct call_media *media, struct call_media *other_media,
 		struct stream_params *sp, sdp_ng_flags *flags);
+__attribute__((nonnull(1, 2, 3)))
 int monologue_publish(struct call_monologue *ml, sdp_streams_q *streams, sdp_ng_flags *flags);
-int monologue_subscribe_request(const subscription_q *srms, struct call_monologue *dst, sdp_ng_flags *flags);
+__attribute__((nonnull(1, 2, 3)))
+int monologue_subscribe_request(const medias_q *medias, struct call_monologue *dst, sdp_ng_flags *flags);
+__attribute__((nonnull(1, 2, 3)))
 int monologue_subscribe_answer(struct call_monologue *dst, sdp_ng_flags *flags,
 		sdp_streams_q *streams);
-int monologue_unsubscribe(struct call_monologue *dst, sdp_ng_flags *);
+__attribute__((nonnull(1, 3)))
+int monologue_unsubscribe(struct call_monologue *dst, struct call_monologue *src, sdp_ng_flags *);
 int monologue_inject_start(struct call_monologue *src, struct call_monologue *dst,
 		sdp_ng_flags *flags);
 int monologue_inject_stop(struct call_monologue *src, struct call_monologue *dst,
 		sdp_ng_flags *flags);
-void dialogue_connect(struct call_monologue *, struct call_monologue *, sdp_ng_flags *);
+
+__attribute__((nonnull(1, 2, 3)))
+void dialogue_connect(const medias_q *, struct call_monologue *, sdp_ng_flags *);
+
+__attribute__((nonnull(1, 2, 3, 5, 6, 7)))
+void subscriber_connect(const medias_q *src_medias, struct call_monologue *dst_ml, sdp_ng_flags *flags,
+		bool directional, medias_q *upd_src_medias, medias_q *upd_dst_medias, medias_q *unconf_medias);
+__attribute__((nonnull(1, 2, 3, 4)))
+void subscriber_connect_finish(medias_q *upd_src_medias, medias_q *upd_dst_medias, medias_q *unconf_medias,
+		sdp_ng_flags *flags);
+
+
+__attribute__((nonnull(1, 2, 3)))
 bool monologue_transform(struct call_monologue *, sdp_ng_flags *, medias_q *);
+__attribute__((nonnull(1, 2)))
+bool monologue_call_create(struct call_monologue *, sdp_ng_flags *);
+__attribute__((nonnull(1, 2)))
+bool monologue_call_create_answer(struct call_monologue *, sdp_ng_flags *, sdp_streams_q *streams);
 void monologue_destroy(struct call_monologue *ml);
+
+__attribute__((nonnull(1)))
 int call_delete_branch_by_id(const str *callid, const str *branch,
 	const str *fromtag, const str *totag, ng_command_ctx_t *, int64_t delete_delay);
-int call_delete_branch(call_t *, const str *branch,
-	const str *fromtag, const str *totag, ng_command_ctx_t *, int64_t delete_delay);
+
+__attribute__((nonnull(1, 2)))
+int call_delete_branch(call_t *, const str *callid, const str *branch,
+	const str *fromtag, const str *totag, ng_command_ctx_t *, int64_t delete_delay,
+	bool stats);
+
 void call_destroy(call_t *);
 struct call_media *call_media_new(call_t *call);
-void call_media_free(struct call_media **mdp);
+void call_media_free(struct call_media *);
 enum call_stream_state call_stream_state_machine(struct packet_stream *);
 void call_media_state_machine(struct call_media *m);
 void call_media_unkernelize(struct call_media *media, const char *reason);
-void dialogue_unconfirm(struct call_monologue *ml, const char *);
 void __monologue_unconfirm(struct call_monologue *monologue, const char *);
 void __media_unconfirm(struct call_media *media, const char *);
+
 __attribute__((nonnull(1)))
+/* one monologue's state from before an offer, held as a call record snapshot */
+struct call_checkpoint {
+	bool pending;
+	str snapshot;
+};
+
+void call_checkpoint_offer(call_t *, struct call_monologue *, struct call_monologue *, bool);
+void call_checkpoint_answer(call_t *, struct call_monologue *, struct call_monologue *);
+int call_checkpoint_rollback(call_t *, struct call_monologue *, struct call_monologue *);
+void call_checkpoint_free_all(call_t *);
+
 void update_init_monologue_subscribers(struct call_monologue *ml, enum ng_opmode opmode);
+
+__attribute__((nonnull(1)))
+void update_init_subscribers(struct call_media *media, struct stream_params *sp,
+		sdp_ng_flags *flags, enum ng_opmode opmode);
 
 int call_stream_address(GString *, struct packet_stream *ps, enum stream_address_format format,
 		const struct local_intf *ifa, bool keep_unspec);
@@ -929,12 +999,23 @@ enum thread_looper_action call_timer(void);
 
 void __rtp_stats_update(rtp_stats_ht dst, struct codec_store *);
 bool __init_stream(struct packet_stream *ps);
+void call_media_stop(struct call_media *);
 
 const rtp_payload_type *__rtp_stats_codec(struct call_media *m);
 
 
 TYPED_GHASHTABLE(subscription_store_ht, struct call_media, struct media_subscription,
 		media_direct_hash, media_direct_eq, NULL, media_subscription_free)
+
+
+__attribute__((nonnull(1)))
+void call_unlock_release(call_t *c);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(call_t, call_unlock_release)
+
+__attribute__((nonnull(1)))
+void call_q_unlock_release(call_q *);
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(call_q, call_q_unlock_release);
+
 
 
 #include "str.h"

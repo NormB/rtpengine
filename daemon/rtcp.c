@@ -8,7 +8,7 @@
 #include "compat.h"
 #include "str.h"
 #include "call.h"
-#include "log.h"
+#include "log_d.h"
 #include "rtp.h"
 #include "crypto.h"
 #include "homer.h"
@@ -16,7 +16,6 @@
 #include "rtcplib.h"
 #include "ssrc.h"
 #include "sdp.h"
-#include "log_funcs.h"
 
 /* This toggles between two different and incompatible interpretations of
  * RFC 3711, namely sections 4.3.2 and 4.3.1.
@@ -1408,6 +1407,62 @@ void rtcp_init(void) {
 
 
 
+// Send generated RTCP to Homer in the same JSON format used for received RTCP.
+static void rtcp_homer_generated(call_t *c, struct sender_report_packet *sr,
+		struct ssrc_sender_report *ssr, ssrc_rr_q *srrs, struct call_media *media,
+		uint32_t ssrc, const endpoint_t *src, const endpoint_t *dst)
+{
+	struct rtcp_process_ctx ctx;
+	struct sdes_chunk chunk;
+	struct sdes_item item;
+	struct source_description_packet sdes;
+
+	if (!rtcp_handlers.homer->init)
+		return;
+
+	ZERO(ctx);
+	rtcp_handlers.homer->init(&ctx);
+
+	ctx.scratch_common_ssrc = ssrc;
+	ctx.scratch.sr = *ssr;
+	ctx.scratch.sr.ssrc = ssrc;
+
+	rtcp_handlers.homer->sr(&ctx, sr);
+	rtcp_handlers.homer->rr_list_start(&ctx, &sr->rtcp);
+
+	for (__auto_type l = srrs->head; l; l = l->next) {
+		struct ssrc_receiver_report *srr = l->data;
+		ctx.scratch.rr = *srr;
+		rtcp_handlers.homer->rr(&ctx, NULL);
+	}
+
+	rtcp_handlers.homer->rr_list_end(&ctx);
+
+	ZERO(sdes);
+	sdes.header.count = 1;
+	rtcp_handlers.homer->sdes_list_start(&ctx, &sdes);
+
+	ZERO(chunk);
+	chunk.ssrc = htonl(ssrc);
+
+	ZERO(item);
+	item.type = SDES_TYPE_CNAME;
+	item.length = rtpe_instance_id.len;
+	rtcp_handlers.homer->sdes_item(&ctx, &chunk, &item, rtpe_instance_id.s);
+
+	if (media->bundle) {
+		ZERO(item);
+		item.type = SDES_TYPE_MID;
+		item.length = media->media_id.len;
+		rtcp_handlers.homer->sdes_item(&ctx, &chunk, &item, media->media_id.s);
+	}
+
+	rtcp_handlers.homer->sdes_list_end(&ctx);
+	rtcp_handlers.homer->finish(&ctx, c, src, dst, rtpe_now);
+}
+
+
+
 static GString *rtcp_sender_report(struct ssrc_sender_report *ssr,
 		uint32_t ssrc, uint32_t ssrc_out, uint32_t ts, uint32_t packets, uint32_t octets, ssrc_q *rrs,
 		ssrc_rr_q *srrs, struct call_media *media)
@@ -1444,6 +1499,13 @@ static GString *rtcp_sender_report(struct ssrc_sender_report *ssr,
 	int i = 0, n = 0;
 	while (rrs->length) {
 		struct ssrc_entry_call *s = t_queue_pop_head(rrs);
+
+		// don't send a receiver report for ourselves. prevents possible deadlock
+		if (s->h.ssrc == ssrc) {
+			ssrc_entry_release(s);
+			continue;
+		}
+
 		if (i < 30) {
 			g_string_set_size(ret, ret->len + sizeof(struct report_block));
 			struct report_block *rr = (void *) ret->str + ret->len - sizeof(struct report_block);
@@ -1560,6 +1622,7 @@ static void rtcp_receiver_reports(ssrc_q *out, struct ssrc_hash *hash) {
 
 // call must be locked in R
 // if a `ps` is locked, it must be passed as argument
+// ssrc_out may be locked
 void rtcp_send_report(struct call_media *media, struct ssrc_entry_call *ssrc_out,
 		const struct packet_stream *locked)
 {
@@ -1600,6 +1663,11 @@ void rtcp_send_report(struct call_media *media, struct ssrc_entry_call *ssrc_out
 			atomic64_get_na(&ssrc_out->stats->packets),
 			atomic64_get(&ssrc_out->stats->bytes),
 			&rrs, &srrs, media);
+
+	// mirror generated RTCP to Homer (plaintext, before SRTCP) if configured
+	rtcp_homer_generated(media->call, (struct sender_report_packet *) sr->str,
+			&ssr, &srrs, media, ssrc_out->h.ssrc,
+			&ps->selected_sfd->socket.local, &ps->endpoint);
 
 	// handle crypto
 

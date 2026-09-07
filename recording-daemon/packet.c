@@ -6,7 +6,7 @@
 #include <unistd.h>
 #include <openssl/err.h>
 #include "types.h"
-#include "log.h"
+#include "log_r.h"
 #include "rtplib.h"
 #include "str.h"
 #include "decoder.h"
@@ -17,13 +17,12 @@
 #include "streambuf.h"
 #include "resample.h"
 #include "tag.h"
-#include "fix_frame_channel_layout.h"
+#include "fix_frame_channel_layout.compat"
 #include "tls_send.h"
 #include "mix.h"
 
 
-static void packet_free(void *p) {
-	packet_t *packet = p;
+static void packet_free(packet_t *packet) {
 	if (!packet)
 		return;
 	free(packet->buffer);
@@ -65,7 +64,7 @@ static ssrc_t *ssrc_get(stream_t *stream, unsigned long ssrc) {
 	ret->metafile = mf;
 	ret->stream = stream;
 	ret->ssrc = ssrc;
-	packet_sequencer_init(&ret->sequencer, packet_free);
+	packet_sequencer_init(&ret->sequencer, (void (*)(seq_packet_t *)) packet_free);
 
 	g_hash_table_insert(mf->ssrc_hash, GUINT_TO_POINTER(ssrc), ret);
 
@@ -80,7 +79,8 @@ out:
 			char buf[16];
 			snprintf(buf, sizeof(buf), "%08lx", ssrc);
 			tag_t *tag = tag_get(mf, stream->tag);
-			ret->output = output_new_ext(mf, buf, "single", tag->label);
+			if (tag)
+				ret->output = output_new_ext(mf, buf, "single", tag->label);
 		}
 
 		db_do_stream(mf, ret->output, stream, ssrc);
@@ -91,6 +91,9 @@ out:
 	return ret;
 }
 
+
+static_assert(0x7f < G_N_ELEMENTS(((ssrc_t *)0)->decoders),
+	"payload_type mask 0x7f must be within decoders array bounds");
 
 // ssrc is locked
 static void packet_decode(ssrc_t *ssrc, packet_t *packet) {
@@ -150,7 +153,7 @@ static void ssrc_run(ssrc_t *ssrc) {
 		packet_decode(ssrc, packet);
 
 		packet_free(packet);
-		dbg("packets left in queue: %i", g_tree_nnodes(ssrc->sequencer.packets));
+		dbg("packets left in queue: %i", ssrc->sequencer.n_pks);
 	}
 
 	pthread_mutex_unlock(&ssrc->lock);
@@ -198,7 +201,7 @@ void packet_process(stream_t *stream, unsigned char *buf, unsigned len) {
 	if (!ssrc) // stream shutdown
 		goto out;
 	if (packet_sequencer_insert(&ssrc->sequencer, &packet->p) < 0) {
-		dbg("skipping dupe packet (new seq %i prev seq %i)", packet->p.seq, ssrc->sequencer.seq);
+		dbg("skipping dupe packet (new seq %i prev seq %i)", packet->p.seq, ssrc->sequencer.a_seq);
 		goto skip;
 	}
 

@@ -9,15 +9,13 @@ use Test::More;
 use POSIX;
 
 
+$ENV{RTPENGINE_EXTENDED_TESTS} or exit;
+
+
 autotest_start(qw(--config-file=none -t -1 -i 203.0.113.1 -i 2001:db8:4321::1
 			-n 2223 -c 12345 -f -L 7 -E -u 2222 --silence-detect=1 --dtx-delay=10
 			--dtx-shift=0))
 		or die;
-
-
-my $amr_tests = $ENV{RTPENGINE_EXTENDED_TESTS};
-#my $amr_tests = 0;
-
 
 
 my ($sock_a, $sock_b, $sock_c, $sock_d, $port_a, $port_b, $ssrc, $ssrc_b, $resp,
@@ -27,8 +25,6 @@ my ($sock_a, $sock_b, $sock_c, $sock_d, $port_a, $port_b, $ssrc, $ssrc_b, $resp,
 
 
 
-
-if ($amr_tests) {
 
 ($sock_a, $sock_b) = new_call([qw(198.51.100.10 5210)], [qw(198.51.100.10 5212)]);
 
@@ -1166,11 +1162,11 @@ v=0
 o=- 1545997027 1 IN IP4 198.51.100.10
 s=tester
 t=0 0
-m=audio PORT RTP/AVP 9 97 108 8 96 101
+m=audio PORT RTP/AVP 9 111 108 8 96 101
 c=IN IP4 203.0.113.1
 a=rtpmap:9 G722/8000
-a=rtpmap:97 AMR-WB/16000
-a=fmtp:97 mode-set=0,1,2;mode-change-period=2;mode-change-capability=2
+a=rtpmap:111 AMR-WB/16000
+a=fmtp:111 mode-set=0,1,2; mode-change-period=2; mode-change-capability=2
 a=rtpmap:108 AMR/8000
 a=fmtp:108 mode-set=7
 a=rtpmap:8 PCMA/8000
@@ -1538,7 +1534,6 @@ rcv($sock_b, $port_a, rtpm(96, $seq + 11, 9880, $ssrc, "\xf1\x58\x43\x02\x1c\x1c
 
 rtpe_req('delete', 'AMR w reverse DTMF', { 'from-tag' => ft() });
 
-}
 
 
 ($sock_a, $sock_b) = new_call([qw(198.51.100.10 5000)], [qw(198.51.100.10 5002)]);

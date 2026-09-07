@@ -17,6 +17,7 @@ struct packet_stream;
 struct codec_packet;
 struct media_player;
 
+#define KERNEL_IDX_NONE UINT_MAX
 
 typedef struct {
 	long long start_pos;
@@ -26,7 +27,7 @@ typedef struct {
 	unsigned int block_egress:1,
 				moh:1;
 	str file, blob;
-	long long db_id;
+	unsigned long long db_id;
 } media_player_opts_t;
 
 
@@ -40,7 +41,7 @@ struct media_player_media_file;
 
 struct media_player_content_index {
 	enum { MP_OTHER = 0, MP_FILE = 1, MP_DB, MP_BLOB } type;
-	long long db_id;
+	unsigned long long db_id;
 	str file; // file name or binary blob
 };
 
@@ -52,7 +53,8 @@ typedef bool (*media_player_run_func)(struct media_player *);
 struct media_player_coder {
 	AVFormatContext *fmtctx;
 	AVStream *avstream;
-	unsigned long duration; // in milliseconds
+	int64_t duration; // in milliseconds
+	int64_t next_pts; // to adjust for duration/pts drift
 	AVPacket *pkt;
 	AVIOContext *avioctx;
 	str blob;
@@ -65,7 +67,6 @@ struct media_player {
 	mutex_t lock;
 	media_player_run_func run_func;
 	call_t *call;
-	struct call_monologue *ml;
 	struct call_media *media;
 	struct sink_handler sink;
 
@@ -121,29 +122,26 @@ struct send_timer {
 
 #define MPO(...) (media_player_opts_t){__VA_ARGS__}
 
-void media_player_new(struct media_player **, struct call_monologue *, struct ssrc_entry_call *prev_ssrc, media_player_opts_t *);
-bool media_player_add(struct media_player *mp, media_player_opts_t opts);
+void media_player_new(struct media_player **, struct call_media *,
+		struct ssrc_entry_call *prev_ssrc, media_player_opts_t *);
+bool media_player_play(struct media_player *mp, media_player_opts_t *opts);
 bool media_player_start(struct media_player *);
 long long media_player_stop(struct media_player *);
-bool media_player_is_active(struct call_monologue *);
+bool media_player_is_active(struct call_media *);
 
 int media_player_setup(struct media_player *mp, const rtp_payload_type *src_pt,
 		const rtp_payload_type *dst_pt, str_case_value_ht codec_set);
-void media_player_set_media(struct media_player *mp, struct call_media *media);
+void media_player_set_sink(struct media_player *mp);
 bool media_player_pt_match(const struct media_player *mp, const rtp_payload_type *src_pt,
 		const rtp_payload_type *dst_pt);
 
 void media_player_add_packet(struct media_player *mp, char *buf, size_t len,
-		int64_t us_dur, unsigned long long pts);
+		int64_t us_dur, int64_t pts);
 
-const char * call_play_media_for_ml(struct call_monologue *ml,
-		media_player_opts_t opts, sdp_ng_flags *flags);
-long long call_stop_media_for_ml(struct call_monologue *ml);
-bool call_ml_wants_moh(struct call_monologue *from_ml, struct call_monologue *to_ml, enum ng_opmode opmode);
-bool call_ml_stops_moh(struct call_monologue *from_ml, struct call_monologue *to_ml,
-		enum ng_opmode opmode);
-void call_ml_moh_handle_flags(struct call_monologue *from_ml, struct call_monologue *to_ml);
-const char * call_check_moh(struct call_monologue *from_ml, struct call_monologue *to_ml,
+const char *call_play_media_for_ml(struct call_monologue *ml, unsigned int mp_idx,
+		media_player_opts_t *opts, sdp_ng_flags *flags);
+long long call_stop_media_for_ml(struct call_monologue *ml, unsigned int mp_idx);
+const char *call_check_moh(struct call_monologue *from_ml, struct call_monologue *to_ml,
 	sdp_ng_flags *flags);
 
 void media_player_init(void);

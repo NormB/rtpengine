@@ -69,21 +69,10 @@ struct socket_family {
 	bool				(*sockaddr2endpoint)(endpoint_t *, const void *);
 	bool				(*endpoint2sockaddr)(void *, const endpoint_t *);
 	bool				(*addrport2sockaddr)(void *, const sockaddr_t *, unsigned int);
-	bool				(*bind)(socket_t *, unsigned int, const sockaddr_t *);
-	bool				(*connect)(socket_t *, const endpoint_t *);
-	bool				(*listen)(socket_t *, int);
-	bool				(*accept)(socket_t *, socket_t *);
-	bool				(*getsockname)(socket_t *);
-	bool				(*timestamping)(socket_t *);
 	bool				(*pktinfo)(socket_t *);
-	ssize_t				(*recvfrom)(socket_t *, void *, size_t, endpoint_t *);
-	ssize_t				(*recvfrom_ts)(socket_t *, void *, size_t, endpoint_t *, int64_t *);
 	ssize_t				(*recvfrom_to)(socket_t *, void *, size_t, endpoint_t *, sockaddr_t *);
-	ssize_t				(*sendmsg)(socket_t *, struct msghdr *, const endpoint_t *);
-	ssize_t				(*sendto)(socket_t *, const void *, size_t, const endpoint_t *);
 	bool				(*tos)(socket_t *, unsigned int);
 	void				(*pmtu_disc)(socket_t *, int);
-	int				(*error)(socket_t *);
 	void				(*endpoint2kernel)(struct re_address *, const endpoint_t *);
 	void				(*kernel2endpoint)(endpoint_t *, const struct re_address *);
 	unsigned int			(*packet_header)(unsigned char *, const endpoint_t *, const endpoint_t *,
@@ -106,13 +95,23 @@ struct socket {
 	sockfamily_t			*family;
 	endpoint_t			local;
 	endpoint_t			remote;
+	unsigned int			tos;
 };
-
-
 
 
 extern socktype_t *socktype_udp;
 
+
+bool socket_bind(socket_t *s, unsigned int, const sockaddr_t *);
+bool socket_connect(socket_t *s, const endpoint_t *);
+bool socket_accept(socket_t *s, socket_t *new_sock);
+bool socket_getsockname(socket_t *s);
+bool socket_timestamping(socket_t *s);
+ssize_t socket_recvfrom(socket_t *s, void *buf, size_t len, endpoint_t *ep);
+ssize_t socket_recvfrom_ts(socket_t *s, void *buf, size_t len, endpoint_t *ep, int64_t *);
+ssize_t socket_sendmsg(socket_t *s, struct msghdr *mh, const endpoint_t *ep);
+ssize_t socket_sendto(socket_t *s, const void *buf, size_t len, const endpoint_t *ep);
+int socket_error(socket_t *s);
 
 
 #include "auxlib.h"
@@ -181,15 +180,16 @@ INLINE bool is_addr_unspecified(const sockaddr_t *a) {
 		return true;
 	return !a->family->is_specified(a);
 }
-#define socket_recvfrom(s,a...) (s)->family->recvfrom((s), a)
-#define socket_recvfrom_ts(s,a...) (s)->family->recvfrom_ts((s), a)
+INLINE bool socket_listen(socket_t *s, int backlog) {
+	return listen(s->fd, backlog) == 0;
+}
+INLINE ssize_t socket_sendmsg_direct(socket_t *s, struct msghdr *mh) {
+	return sendmsg(s->fd, mh, 0);
+}
+
 #define socket_recvfrom_to(s,a...) (s)->family->recvfrom_to((s), a)
-#define socket_sendmsg(s,a...) (s)->family->sendmsg((s), a)
-#define socket_sendto(s,a...) (s)->family->sendto((s), a)
-#define socket_error(s) (s)->family->error((s))
-#define socket_timestamping(s) (s)->family->timestamping((s))
 #define socket_pktinfo(s) (s)->family->pktinfo((s))
-#define socket_getsockname(s) (s)->family->getsockname((s))
+
 INLINE ssize_t socket_sendiov(socket_t *s, const struct iovec *v, unsigned int len, const endpoint_t *dst,
 		const sockaddr_t *src)
 {
@@ -307,7 +307,7 @@ bool endpoint_parse_any(endpoint_t *, const char *); // address (ip) optional
 bool sockaddr_getaddrinfo_alt(sockaddr_t *a, sockaddr_t *a2, const char *s);
 bool endpoint_parse_any_getaddrinfo_alt(endpoint_t *d, endpoint_t *d2, const char *s); // address (ip or hostname) optional
 INLINE bool endpoint_parse_any_getaddrinfo(endpoint_t *d, const char *s);
-void endpoint_parse_sockaddr_storage(endpoint_t *, struct sockaddr_storage *);
+void endpoint_parse_sockaddr_storage(endpoint_t *, const struct sockaddr_storage *);
 void kernel2endpoint(endpoint_t *ep, const struct re_address *ra);
 
 unsigned int sockaddr_hash(const sockaddr_t *);
@@ -367,6 +367,7 @@ INLINE bool endpoint_parse_any_str(endpoint_t *d, str *s) {
 
 INLINE void set_tos(socket_t *s, unsigned int tos) {
 	s->family->tos(s, tos);
+	s->tos = tos;
 }
 INLINE void set_pmtu_disc(socket_t *s, int opt) {
 	if (s->family->pmtu_disc)

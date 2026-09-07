@@ -1,7 +1,6 @@
 #include "uring.h"
 #include <string.h>
 #include <poll.h>
-#include "log.h"
 #include "loglib.h"
 #include "socket.h"
 #include "poller.h"
@@ -46,28 +45,47 @@ struct poller_req {
 	};
 };
 
-static ssize_t __socket_sendmsg(socket_t *s, struct msghdr *m, const endpoint_t *e,
-		struct sockaddr_storage *ss, struct uring_req *r)
+__attribute__((nonnull(1, 2)))
+static ssize_t __socket_sendmsg(socket_t *s, struct uring_req_sendmsg *r)
 {
-	ssize_t ret = socket_sendmsg(s, m, e);
-	r->handler(r, 0, 0);
+	ssize_t ret = socket_sendmsg_direct(s, &r->mh);
+	if (ret >= 0)
+		uring_req_release(&r->req);
 	return ret;
 }
 static unsigned int __dummy_thread_loop(void) {
 	return 0;
 }
-static void *__dummy_alloc(void *stack_storage, size_t len) {
+static void *__stack_alloc(void *stack_storage, size_t len) {
 	return stack_storage;
 }
 static void __dummy_free(struct uring_req *dummy) {
+}
+static void __heap_free(struct uring_req *r) {
+	g_free(r);
+}
+
+static struct uring_req_sendmsg * __stack_dup(struct uring_req_sendmsg *req, size_t size) {
+	struct uring_req_sendmsg *ret = g_malloc(size);
+	memcpy(ret, req, size);
+
+	// adjust contained pointers
+	ret->mh.msg_iov = ret->iov;
+	ret->mh.msg_name = &ret->ss;
+
+	return ret;
 }
 
 
 __thread struct uring_methods uring_methods = {
 	.sendmsg = __socket_sendmsg,
 	.thread_loop = __dummy_thread_loop,
+
 	.free = __dummy_free,
-	.__alloc_req = __dummy_alloc,
+	.__alloc_req = __stack_alloc,
+
+	.__alloc_dup = __stack_dup,
+	.dup_free = __heap_free,
 };
 
 
@@ -90,16 +108,13 @@ struct uring_buffer_req {
 static __thread struct io_uring rtpe_uring;
 
 
-static ssize_t __uring_sendmsg(socket_t *s, struct msghdr *m, const endpoint_t *e,
-		struct sockaddr_storage *ss, struct uring_req *r)
+__attribute__((nonnull(1, 2)))
+static ssize_t __uring_sendmsg(socket_t *s, struct uring_req_sendmsg *r)
 {
 	struct io_uring_sqe *sqe = io_uring_get_sqe(&rtpe_uring);
 	assert(sqe != NULL);
-	s->family->endpoint2sockaddr(ss, e);
-	m->msg_name = ss;
-	m->msg_namelen = s->family->sockaddr_size;
 	io_uring_sqe_set_data(sqe, r);
-	io_uring_prep_sendmsg(sqe, s->fd, m, 0);
+	io_uring_prep_sendmsg(sqe, s->fd, &r->mh, 0);
 
 	return 0;
 }
@@ -123,9 +138,8 @@ static unsigned int __uring_thread_loop(void) {
 static void *__uring_alloc(void *dummy, size_t len) {
 	return g_malloc(len);
 }
-
-static void __uring_free(struct uring_req *r) {
-	g_free(r);
+static struct uring_req_sendmsg * __dummy_dup(struct uring_req_sendmsg *req, size_t size) {
+	return req;
 }
 
 void uring_thread_init(void) {
@@ -141,7 +155,9 @@ void uring_thread_init(void) {
 		.sendmsg = __uring_sendmsg,
 		.thread_loop = __uring_thread_loop,
 		.__alloc_req = __uring_alloc,
-		.free = __uring_free,
+		.free = __heap_free,
+		.__alloc_dup = __dummy_dup,
+		.dup_free = __dummy_free,
 	};
 }
 

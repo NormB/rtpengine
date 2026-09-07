@@ -13,6 +13,7 @@
 #include "socket.h"
 #include "containers.h"
 #include "codec.h"
+#include "uring.h"
 
 #include "nft_rtpengine.h"
 #include "common_stats.h"
@@ -244,6 +245,7 @@ struct stream_fd {
 	int				error_strikes;
 	int				active_read_events;
 	struct poller			*poller;
+	sendmsg_q			send_q;
 
 	unsigned int			users;
 
@@ -308,6 +310,7 @@ struct media_packet {
 	struct call_media *media_out; // output media
 	struct sink_handler sink;
 	struct media_player_cache_entry *cache_entry;
+	bool recording_egress;
 
 	struct rtp_header *rtp;
 	struct rtcp_packet *rtcp;
@@ -354,10 +357,10 @@ struct rtp_extension {
 };
 
 
-static inline void rtp_extension_free(struct rtp_extension *r) {
+INLINE void rtp_extension_free(struct rtp_extension *r) {
 	g_free(r);
 }
-static inline void rtp_ext_data_free(struct rtp_extension_data *r) {
+INLINE void rtp_ext_data_free(struct rtp_extension_data *r) {
 	g_free(r);
 }
 
@@ -427,7 +430,6 @@ INLINE void stream_fd_dec(stream_fd *sfd) {
 
 void free_sfd_intf_list(struct sfd_intf_list *il);
 void free_release_sfd_intf_list(struct sfd_intf_list *il);
-void free_socket_intf_list(struct socket_intf_list *il);
 
 void __unkernelize(struct packet_stream *, const char *);
 void unkernelize(struct packet_stream *, const char *);
@@ -460,6 +462,9 @@ void sink_handler_set_generic(struct sink_handler *sh);
 
 __attribute__((nonnull(2, 3)))
 int media_packet_encrypt(rewrite_func encrypt_func, struct packet_stream *out, struct media_packet *mp);
+
+void stream_fd_kernel_input(stream_fd *, char *, size_t,
+		const struct re_address *, const struct re_address *, int64_t);
 
 const struct transport_protocol *transport_protocol(const str *s);
 

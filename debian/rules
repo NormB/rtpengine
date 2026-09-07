@@ -24,15 +24,30 @@ export FIXTURES_PATH = /usr/share/rtpengine-perftest
 export deb_systemdsystemunitdir := $(shell pkg-config --variable=systemdsystemunitdir systemd)
 
 %:
-	dh $@
+	dh $@ --with python3
+
+override_dh_auto_build:
+	dh_auto_build
+ifneq (,$(filter $(DEB_BUILD_PROFILES),pkg.ngcp-rtpengine.pysip-lite))
+	dh_auto_build \
+		--buildsystem=pybuild
+endif
+
+override_dh_auto_install:
+	dh_auto_install
+ifneq (,$(filter $(DEB_BUILD_PROFILES),pkg.ngcp-rtpengine.pysip-lite))
+	dh_auto_install \
+		--buildsystem=pybuild \
+		--destdir=$(CURDIR)/debian/ngcp-python3-pysip-lite
+endif
 
 execute_before_dh_auto_configure:
 	(cd debian && sh generate-systemd-templates.sh)
 
 execute_before_dh_auto_install-indep:
 	# markdown README
-	markdown README.md | gzip -9 > debian/README.html.gz
-	gzip -9 < README.md > debian/README.md.gz
+	markdown README.md | gzip -9n > debian/README.html.gz
+	gzip -9n < README.md > debian/README.md.gz
 
 execute_after_dh_installsystemd:
 	dh_installsystemd -pngcp-rtpengine-recording-daemon --name=ngcp-rtpengine-recording-nfs-mount

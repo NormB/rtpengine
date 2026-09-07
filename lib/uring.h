@@ -13,12 +13,29 @@ struct uring_req {
 	uring_req_handler_fn *handler;
 };
 
+struct uring_req_sendmsg {
+	struct uring_req req;
+	struct msghdr mh;
+	struct sockaddr_storage ss; // destination address
+	struct iovec iov[0]; // provided by outer container
+};
+
+TYPED_GQUEUE(sendmsg, struct uring_req_sendmsg);
+
+
 struct uring_methods {
-	ssize_t (*sendmsg)(socket_t *, struct msghdr *, const endpoint_t *,
-			struct sockaddr_storage *, struct uring_req *);
+	ssize_t (*sendmsg)(socket_t *, struct uring_req_sendmsg *)
+		__attribute__((nonnull(1, 2)));
+
 	unsigned int (*thread_loop)(void);
+
+	// possibly stack storage
+	void *(*__alloc_req)(void *, size_t); 
 	void (*free)(struct uring_req *);
-	void *(*__alloc_req)(void *, size_t);
+
+	// to transfer from possibly stack to heap for queuing
+	struct uring_req_sendmsg *(*__alloc_dup)(struct uring_req_sendmsg *, size_t);
+	void (*dup_free)(struct uring_req *);
 };
 
 extern __thread struct uring_methods uring_methods;
@@ -26,13 +43,43 @@ extern __thread struct uring_methods uring_methods;
 INLINE void uring_req_free(struct uring_req *r, int32_t res, uint32_t flags) {
 	uring_methods.free(r);
 }
+INLINE void uring_req_release(struct uring_req *r) {
+	r->handler(r, 0, 0);
+}
 
-#define uring_alloc(sv, fn) ({ \
+__attribute__((nonnull(1, 2, 3)))
+INLINE void uring_sendmsg_prepare(socket_t *s, const endpoint_t *e, struct uring_req_sendmsg *r) {
+	s->family->endpoint2sockaddr(&r->ss, e);
+	r->mh.msg_name = &r->ss;
+	r->mh.msg_namelen = s->family->sockaddr_size;
+}
+
+__attribute__((nonnull(1, 2, 3)))
+INLINE ssize_t uring_sendmsg_fail(socket_t *s, const endpoint_t *e, struct uring_req_sendmsg *r) {
+	uring_sendmsg_prepare(s, e, r);
+	return uring_methods.sendmsg(s, r);
+}
+
+__attribute__((nonnull(1, 2, 3)))
+INLINE ssize_t uring_sendmsg(socket_t *s, const endpoint_t *e, struct uring_req_sendmsg *r) {
+	uring_sendmsg_prepare(s, e, r);
+
+	ssize_t ret = uring_methods.sendmsg(s, r);
+	if (ret < 0)
+		uring_req_release(&r->req);
+
+	return ret;
+}
+
+
+#define uring_alloc_sendmsg(sv, fn) ({ \
 			__typeof__(sv) __ret = uring_methods.__alloc_req((sv), sizeof(*(sv))); \
 			memset(sv, 0, sizeof(*(sv))); \
-			__ret->req.handler = (fn); \
+			__ret->req.req.handler = (fn); \
 			__ret; \
 		})
+
+#define uring_dup_sendmsg(sv) uring_methods.__alloc_dup(&(sv)->req, sizeof(*(sv)))
 
 
 #ifdef HAVE_LIBURING

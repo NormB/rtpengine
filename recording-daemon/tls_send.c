@@ -3,12 +3,12 @@
 #include <unistd.h>
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-#include "log.h"
+#include "log_r.h"
 #include "types.h"
 #include "resample.h"
 #include "main.h"
 #include "streambuf.h"
-#include "fix_frame_channel_layout.h"
+#include "fix_frame_channel_layout.compat"
 #include "output.h"
 #include "tag.h"
 

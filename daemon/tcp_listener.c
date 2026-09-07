@@ -6,10 +6,9 @@
 #include "obj.h"
 #include "socket.h"
 #include "helpers.h"
-#include "log.h"
+#include "log_d.h"
 #include "streambuf.h"
 #include "media_socket.h"
-#include "log_funcs.h"
 
 struct tcp_listener_callback {
 	struct obj obj;
@@ -40,7 +39,7 @@ static void tcp_listener_incoming(int fd, void *p) {
 	listener = cb->ul;
 
 	for (;;) {
-		ret = listener->family->accept(listener, &newsock);
+		ret = socket_accept(listener, &newsock);
 		if (!ret) {
 			if (errno == EINTR)
 				continue;
@@ -80,7 +79,7 @@ static int tcp_listener_init(socket_t *sock, const endpoint_t *ep,
 
 	if (!open_socket(sock, SOCK_STREAM, ep->port, &ep->address))
 		goto fail;
-	if (!sock->family->listen(sock, 5))
+	if (!socket_listen(sock, 5))
 		goto fail;
 
 	ZERO(i);

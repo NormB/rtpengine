@@ -6,17 +6,9 @@ include ../lib/deps.Makefile
 
 FIXTURES_PATH ?= ../fixtures
 
-ifeq ($(origin CFLAGS),undefined)
-CFLAGS ?= -g -Wall -Wextra -Wno-sign-compare -Wno-unused-parameter -Wstrict-prototypes -Werror=return-type \
-		-Wshadow
-else
-CFLAGS := $(CFLAGS)
-endif
+include ../lib/flags.Makefile
 
-CFLAGS += -pthread
-CFLAGS += -std=c11
 CFLAGS += -I. -I../kernel-module/ -I../lib/
-CFLAGS += -D_GNU_SOURCE
 CFLAGS += -DFIXTURES_PATH="\"$(FIXTURES_PATH)\""
 CFLAGS += -DWITH_TRANSCODING
 CFLAGS += $(CFLAGS_LIBPCRE)
@@ -27,13 +19,13 @@ CFLAGS += $(CFLAGS_LIBAVCODEC)
 CFLAGS += $(CFLAGS_LIBAVFORMAT)
 CFLAGS += $(CFLAGS_LIBAVUTIL)
 CFLAGS += $(CFLAGS_LIBSWRESAMPLE)
+CFLAGS += $(CFLAGS_LIBSWSCALE)
 CFLAGS += $(CFLAGS_LIBAVFILTER)
 CFLAGS += $(CFLAGS_SPANDSP)
 CFLAGS += $(CFLAGS_OPUS)
 CFLAGS += $(CFLAGS_NCURSESW)
 CFLAGS += $(CFLAGS_OPENSSL)
 
-LDLIBS := -lm -ldl
 LDLIBS += $(LDLIBS_GLIB)
 LDLIBS += $(LDLIBS_JSON_GLIB)
 LDLIBS += $(LDLIBS_GTHREAD)
@@ -41,6 +33,7 @@ LDLIBS += $(LDLIBS_LIBAVCODEC)
 LDLIBS += $(LDLIBS_LIBAVFORMAT)
 LDLIBS += $(LDLIBS_LIBAVUTIL)
 LDLIBS += $(LDLIBS_LIBSWRESAMPLE)
+LDLIBS += $(LDLIBS_LIBSWSCALE)
 LDLIBS += $(LDLIBS_LIBAVFILTER)
 LDLIBS += $(LDLIBS_SPANDSP)
 LDLIBS += $(LDLIBS_OPUS)
@@ -53,14 +46,16 @@ LDLIBS += $(LDLIBS_BCG729)
 CFLAGS += $(CFLAGS_CODEC_CHAIN)
 LDLIBS += $(LDLIBS_CODEC_CHAIN)
 
-SRCS = main.c log.c
-LIBSRCS = codeclib.strhash.c loglib.c auxlib.c resample.c str.c dtmflib.c rtplib.c poller.c ssllib.c bufferpool.c \
-	  bencode.c uring.c
-LIBASM = mvr2s_x64_avx2.S mvr2s_x64_avx512.S
+SRCS := main.c log.c
+LIBSRCS := codeclib.c loglib.c auxlib.c resample.c str.c dtmflib.c rtplib.c poller.c ssllib.c bufferpool.c \
+	  bencode.c uring.c cchain.c socket.c
+LIBSRCS += rescale.c
+LIBSRCS += $(CODEC_SRCS)
+LIBASM := mvr2s_x64_avx2.S mvr2s_x64_avx512.S
 
 include ../lib/common.Makefile
 
-main.o: ../lib/fix_frame_channel_layout.h
+main.o: ../lib/fix_frame_channel_layout.compat
 
 install: $(TARGET)
 	install -m 0755 -D $(TARGET) $(DESTDIR)/usr/bin/$(TARGET)

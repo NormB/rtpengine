@@ -22,6 +22,8 @@ struct xt_rtpengine_info {
 enum rtpengine_nft_attributes {
 	RTPEA_RTPENGINE_UNSPEC,
 	RTPEA_RTPENGINE_TABLE,
+	RTPEA_RTPENGINE_CREAT,
+	RTPEA_RTPENGINE_EXCL,
 	__RTPEA_RTPENGINE_MAX
 };
 #define RTPEA_RTPENGINE_MAX		(__RTPEA_RTPENGINE_MAX - 1)
@@ -97,6 +99,13 @@ struct rtpengine_output_group {
 	unsigned int rtcp_end_idx;
 };
 
+struct rtpengine_ring_buf_group {
+	unsigned int start_idx;
+	unsigned int num;
+	void *opaque; // copied into buf_slot->opaque
+	atomic_t *opaque_ref; // increased for each reported event
+};
+
 struct rtpengine_target_info {
 	struct re_address		local;
 	struct re_address		expected_src; /* for incoming packets */
@@ -109,7 +118,7 @@ struct rtpengine_target_info {
 	struct rtpengine_srtp		decrypt;
 	uint32_t			ssrc[RTPE_NUM_SSRC_TRACKING]; // Expose the SSRC to userspace when we resync.
 	struct ssrc_stats		*ssrc_stats[RTPE_NUM_SSRC_TRACKING]; // pinned memory
-	unsigned int			ssrc_media_idx[RTPE_NUM_PAYLOAD_TYPES]; // same idx as ssrc
+	unsigned int			ssrc_media_idx[RTPE_NUM_SSRC_TRACKING]; // same idx as ssrc
 
 	struct rtp_stats		*pt_stats[RTPE_NUM_PAYLOAD_TYPES]; // must be sorted by PT, pinned memory
 	unsigned int			pt_media_idx[RTPE_NUM_PAYLOAD_TYPES]; // same idx as pt_stats
@@ -123,6 +132,8 @@ struct rtpengine_target_info {
 
 	struct interface_stats_block	*iface_stats; // for ingress stats, pinned memory
 	struct stream_stats		*stats; // for ingress stats, pinned memory
+
+	struct rtpengine_ring_buf_group	raw_ring_buf; // for unhandled packets
 
 	unsigned int			extmap:1,
 					dtls:1,
@@ -204,7 +215,7 @@ enum rtpengine_command {
 	REMG_ADD_CALL,
 	REMG_DEL_CALL,
 	REMG_ADD_STREAM,
-	REMG_DEL_STREAM,
+	__REMG_UNSUED_1, // REMG_DEL_STREAM,
 	REMG_PACKET,
 	REMG_DEL_TARGET,
 	REMG_INIT_PLAY_STREAMS,
@@ -214,6 +225,7 @@ enum rtpengine_command {
 	REMG_STOP_STREAM,
 	REMG_FREE_PACKET_STREAM,
 	REMG_PIN_MEMORY,
+	REMG_RING_BUFFER,
 
 	__REMG_LAST
 };
@@ -257,6 +269,52 @@ struct rtpengine_play_stream_packet_info {
 struct rtpengine_pin_memory_info {
 	void				*addr;
 	size_t				size;
+};
+
+struct rtpengine_ring_buf_shm {
+	atomic_t			writers; // lock for readers
+	atomic_t			readers; // lock for writers
+	atomic_t			queue; // added to readers when processing starts
+
+	atomic_t			slots_filled;
+	atomic64			filled[3]; // buffers (input, output, interim)
+};
+
+struct rtpengine_buf_metadata {
+	struct re_address		src;
+	struct re_address		dst;
+	void				*opaque; // copied from buf_group->opaque
+	int64_t				ts; // microseconds
+	unsigned int			tos;
+};
+
+struct rtpengine_buf_slot_step {
+	ssize_t				offset; // from start of buffer
+	size_t				length;
+	unsigned int			buffer_idx;
+};
+
+struct rtpengine_buf_slot {
+	struct rtpengine_buf_slot_step	steps[3];
+};
+
+struct rtpengine_ring_buf {
+	void				*head; // in pinned memory
+	struct rtpengine_buf_slot	*slots; // in pinned memory
+	struct rtpengine_buf_metadata	*metadata; // in pinned memory
+	struct rtpengine_ring_buf_shm	*shm; // in pinned memory
+};
+
+struct rtpengine_ring_buf_info {
+	unsigned int			idx; // monotonically increasing from 0
+	unsigned int			num_steps;
+	size_t				sizes[3]; // input, output, interim
+	unsigned int			num_slots;
+	struct rtpengine_ring_buf	buf[2];
+	atomic_t			*buf_idx; // in pinned memory
+	int				run_now_event; // notified as soon as there is data
+	int				writers_done_event; // notified when waiting for writers to finish
+	bool				sender;
 };
 
 struct rtpengine_command_add_target {
@@ -334,6 +392,11 @@ struct rtpengine_command_free_packet_stream {
 struct rtpengine_command_pin_memory {
 	enum rtpengine_command		cmd;
 	struct rtpengine_pin_memory_info pin_memory;
+};
+
+struct rtpengine_command_ring_buf {
+	enum rtpengine_command		cmd;
+	struct rtpengine_ring_buf_info	buf;
 };
 
 

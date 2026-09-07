@@ -1,6 +1,12 @@
 .DEFAULT_GOAL := all
 
+ifeq (,$(filter pkg.ngcp-rtpengine.no-transcoding pkg.rtpengine.no-transcoding,$(DEB_BUILD_PROFILES)))
 with_transcoding ?= yes
+else
+with_transcoding ?= no
+endif
+
+export with_transcoding
 
 export top_srcdir = $(CURDIR)
 
@@ -16,6 +22,9 @@ all:
 ifeq ($(with_transcoding),yes)
 	$(MAKE) -C recording-daemon
 	$(MAKE) -C perf-tester
+endif
+ifneq (,$(filter pkg.ngcp-rtpengine.pysip-lite pkg.rtpengine.pysip-lite,$(DEB_BUILD_PROFILES)))
+	$(MAKE) -C python
 endif
 
 install:
@@ -51,6 +60,7 @@ distclean clean:
 	$(MAKE) -C kernel-module clean
 	$(MAKE) -C t clean
 	$(MAKE) -C lib clean
+	$(MAKE) -C python clean
 	rm -f config.mk
 
 .DEFAULT:

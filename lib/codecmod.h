@@ -1,0 +1,50 @@
+#ifndef _CODECMOD_H_
+#define _CODECMOD_H_
+
+
+#ifndef WITHOUT_CODECLIB
+
+
+#include "codeclib.h"
+
+
+extern const codec_type_t codec_type_avcodec;
+
+extern const dtx_method_t dtx_method_silence;
+extern const dtx_method_t dtx_method_cn;
+
+void packetizer_buffered_init(encoder_t *enc);
+void packetizer_buffered_destroy(encoder_t *enc);
+
+extern packetizer_t packetizer_passthrough; // pass frames as they arrive in AVPackets
+extern packetizer_t packetizer_samplestream; // flat stream of samples
+
+int format_cmp_ignore(const struct rtp_payload_type *, const struct rtp_payload_type *);
+
+
+void avc_init(void);
+void avc_cleanup(void);
+
+void avc_def_init(struct codec_def_s *);
+const char *avc_decoder_init(decoder_t *, const str *);
+int avc_decoder_input(decoder_t *dec, const str *data, frame_q *out, bool);
+void avc_decoder_close(decoder_t *);
+const char *avc_encoder_init(encoder_t *enc, const str *);
+int avc_encoder_input(encoder_t *enc, AVFrame **frame);
+void avc_encoder_close(encoder_t *enc);
+
+const char *avc_video_decoder_init(decoder_t *, const str *);
+int avc_video_encoder_input(encoder_t *enc, AVFrame **frame);
+
+int codeclib_set_av_opt_int(encoder_t *enc, const char *opt, int64_t val);
+int codeclib_set_av_opt_intstr(encoder_t *enc, const str *opt, const str *val);
+void codeclib_key_value_parse(const str *instr,
+		void (*cb)(str *key, str *value, void *data), void *data);
+void codeclib_avc_video_enc_options(str *key, str *value, void *encp);
+
+
+void codeclib_register_codec(const codec_def_t *);
+
+
+#endif
+#endif

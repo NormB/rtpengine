@@ -5,8 +5,7 @@
 #include <netdb.h>
 #include <ctype.h>
 
-#include "log.h"
-#include "log_funcs.h"
+#include "log_d.h"
 
 
 /**
@@ -112,7 +111,7 @@ static long long rtpp_get_int_str(rtpp_pos *a, long long def) {
 	str s;
 	if (!rtpp_get_str(a, &s))
 		return def;
-	return str_to_i(&s, def);
+	return str_to_ll(&s, def);
 }
 static bool rtpp_dict_list_end_rewind(rtpp_pos *pos) {
 	// check for dict/list end, which is only valid if it doesn't also start one
@@ -147,13 +146,13 @@ static bool rtpp_dict_list_closing(rtpp_pos *pos) {
 
 	return true;
 }
-static void rtpp_list_iter(const ng_parser_t *parser, rtpp_pos *pos,
-		void (*str_callback)(str *key, unsigned int, helper_arg),
-		void (*item_callback)(const ng_parser_t *, parser_arg, helper_arg), helper_arg arg)
+static const char *rtpp_list_iter(const ng_parser_t *parser, rtpp_pos *pos,
+		const char *(*str_callback)(str *key, unsigned int, helper_arg),
+		const char *(*item_callback)(const ng_parser_t *, parser_arg, helper_arg), helper_arg arg)
 {
 	// list opener
 	if (!skip_char(&pos->cur, '['))
-		return;
+		return NULL; // return error here?
 
 	unsigned int idx = 0;
 
@@ -168,8 +167,11 @@ static void rtpp_list_iter(const ng_parser_t *parser, rtpp_pos *pos,
 
 		// does it start another list or dict?
 		if (pos->cur.s[0] == '[') {
-			if (item_callback)
-				item_callback(parser, pos, arg);
+			if (item_callback) {
+				const char *err = item_callback(parser, pos, arg);
+				if (err)
+					return err;
+			}
 			goto next;
 		}
 
@@ -180,8 +182,13 @@ static void rtpp_list_iter(const ng_parser_t *parser, rtpp_pos *pos,
 		if (pos->cur.len == 0)
 			break; // nothing left
 
+		const char *err = NULL;
 		if (str_callback)
-			str_callback(&pos->cur, idx++, arg);
+			err = str_callback(&pos->cur, idx++, arg);
+		else if (item_callback)
+			err = item_callback(parser, pos, arg);
+		if (err)
+			return err;
 		if (end)
 			break;
 		goto next;
@@ -191,14 +198,17 @@ next:
 		if (!str_token_sep(&pos->cur, &pos->remainder, ' '))
 			break;
 	}
+
+	return NULL;
 }
-static bool rtpp_dict_iter(const ng_parser_t *parser, rtpp_pos *pos,
-		void (*callback)(const ng_parser_t *, str *, parser_arg, helper_arg),
+
+static const char *rtpp_dict_iter(const ng_parser_t *parser, rtpp_pos *pos,
+		const char *(*callback)(const ng_parser_t *, str *, parser_arg, helper_arg),
 		helper_arg arg)
 {
 	// list opener
 	if (!skip_char(&pos->cur, '['))
-		return false;
+		return NULL;
 
 	while (true) {
 		skip_chars(&pos->cur, ' ');
@@ -223,7 +233,10 @@ static bool rtpp_dict_iter(const ng_parser_t *parser, rtpp_pos *pos,
 		if (pos->cur.len == 0)
 			break; // nothing left
 
-		callback(parser, &key, pos, arg);
+		const char *err = callback(parser, &key, pos, arg);
+		if (err)
+			return err;
+
 		if (rtpp_is_dict_list(pos))
 			rtpp_list_iter(parser, pos, NULL, NULL, NULL);
 		if (end)
@@ -236,7 +249,7 @@ next:
 			break;
 	}
 
-	return true;
+	return NULL;
 }
 static bool rtpp_is_int(rtpp_pos *pos) {
 	return false;

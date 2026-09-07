@@ -9,7 +9,7 @@
 #include <stdint.h>
 #include <libavutil/opt.h>
 #include "types.h"
-#include "log.h"
+#include "log_r.h"
 #include "str.h"
 #include "output.h"
 #include "mix.h"
@@ -24,7 +24,7 @@
 
 // does not initialise the contained `sink`
 decode_t *decoder_new(const char *payload_str, const char *format, int ptime) {
-	char *slash = strchr(payload_str, '/');
+	const char *slash = strchr(payload_str, '/');
 	if (!slash) {
 		ilog(LOG_WARN, "Invalid payload format: %s", payload_str);
 		return NULL;
@@ -66,10 +66,15 @@ decode_t *decoder_new(const char *payload_str, const char *format, int ptime) {
 		.channels = channels,
 		.format = AV_SAMPLE_FMT_S16,
 	};
+	format_t dec_format = (format_t) {
+		.clockrate = rtp_clockrate,
+		.channels = channels,
+		.format = -1,
+	};
 
 	str fmtp = STR(format);
 
-	decoder_t *dec = decoder_new_fmtp(def, rtp_clockrate, channels, ptime, &out_format, NULL, &fmtp, NULL);
+	decoder_t *dec = decoder_new_fmtp(def, &dec_format, ptime, &out_format, NULL, &fmtp, NULL);
 	if (!dec)
 		return NULL;
 	decode_t *deco = g_new0(decode_t, 1);
@@ -117,7 +122,7 @@ static int decoder_got_frame(decoder_t *dec, AVFrame *frame, void *sp, void *dp)
 
 
 int decoder_input(decode_t *deco, const str *data, unsigned long ts, ssrc_t *ssrc) {
-	return decoder_input_data(deco->dec, data, ts, decoder_got_frame, ssrc, deco);
+	return decoder_input_data(deco->dec, data, ts, false, decoder_got_frame, ssrc, deco); // XXX support mark
 }
 
 void decoder_free(decode_t *deco) {

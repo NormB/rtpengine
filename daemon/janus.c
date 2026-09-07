@@ -4,7 +4,7 @@
 #include <stdbool.h>
 
 #include "websocket.h"
-#include "log.h"
+#include "log_d.h"
 #include "main.h"
 #include "obj.h"
 #include "call.h"
@@ -12,7 +12,6 @@
 #include "call_interfaces.h"
 #include "rtplib.h"
 #include "ice.h"
-#include "log_funcs.h"
 
 TYPED_GHASHTABLE(janus_handles_set, uint64_t, void, int64_hash, int64_eq, NULL, NULL)
 TYPED_DIRECT_FUNCS(websocket_conn_direct_hash, websocket_conn_direct_eq, struct websocket_conn)
@@ -116,14 +115,19 @@ static uint64_t jr_str_int(JsonReader *r) {
 }
 
 
-static struct call_monologue *janus_get_monologue(uint64_t handle_id, call_t *call,
-		struct call_monologue *(*fn)(call_t *, const str *))
+static struct call_monologue *janus_call_get_monologue(call_t *c, const str *callid, const str *tag) {
+	return call_get_monologue(c, tag);
+}
+
+
+static struct call_monologue *janus_get_monologue(uint64_t handle_id, call_t *call, const str *callid,
+		struct call_monologue *(*fn)(call_t *, const str *, const str *))
 {
 	g_autoptr(char) handle_buf = NULL;
 	handle_buf = g_strdup_printf("%" PRIu64, handle_id);
 	str handle_str = STR(handle_buf);
 
-	return fn(call, &handle_str);
+	return fn(call, callid, &handle_str);
 }
 
 
@@ -405,7 +409,8 @@ static void janus_publishers_list(JsonBuilder *builder, call_t *call, struct jan
 			continue;
 
 		// get monologue
-		struct call_monologue *ml = janus_get_monologue(*handle_id_ptr, call, call_get_monologue);
+		struct call_monologue *ml = janus_get_monologue(*handle_id_ptr, call, NULL,
+				janus_call_get_monologue);
 		if (!ml)
 			continue;
 
@@ -424,7 +429,7 @@ static void janus_publishers_list(JsonBuilder *builder, call_t *call, struct jan
 
 // global janus_lock is held
 static const char *janus_videoroom_join_sub(struct janus_handle *handle, struct janus_room *room, int *retcode,
-		uint64_t feed_id, call_t *call, subscription_q *medias)
+		uint64_t feed_id, call_t *call, medias_q *medias)
 {
 	// does the feed actually exist? get the feed handle
 	*retcode = 512;
@@ -438,16 +443,16 @@ static const char *janus_videoroom_join_sub(struct janus_handle *handle, struct 
 	t_hash_table_insert(room->subscribers, uint64_dup(handle->id), uint64_dup(feed_id));
 
 	// add the subscription
-	struct call_monologue *source_ml = janus_get_monologue(*feed_handle, call, call_get_monologue);
+	struct call_monologue *source_ml = janus_get_monologue(*feed_handle, call, NULL, janus_call_get_monologue);
 	if (!source_ml)
 		return "Feed not found";
 
 	for (int i = 0; i < source_ml->medias->len; i++)
 	{
-		struct call_media * media = source_ml->medias->pdata[i];
+		struct call_media *media = source_ml->medias->pdata[i];
 		if (!media)
 			continue;
-		add_media_to_sub_list(medias, media, source_ml);
+		t_queue_push_tail(medias, media);
 	}
 	return NULL;
 }
@@ -553,7 +558,7 @@ static const char *janus_videoroom_join(struct websocket_message *wm, struct jan
 	else {
 		// subscriber
 
-		g_auto(subscription_q) srms = IQUEUE_INIT;
+		g_auto(medias_q) medias = TYPED_GQUEUE_INIT;
 
 		// get single feed ID if there is one
 		if (json_reader_read_member(reader, "feed")) {
@@ -562,7 +567,7 @@ static const char *janus_videoroom_join(struct websocket_message *wm, struct jan
 			if (!feed_id)
 				return "JSON object contains invalid 'message.feed' key";
 			const char *ret = janus_videoroom_join_sub(handle, room, retcode, feed_id,
-					call, &srms);
+					call, &medias);
 			if (ret)
 				return ret;
 		}
@@ -596,7 +601,7 @@ static const char *janus_videoroom_join(struct websocket_message *wm, struct jan
 
 				if (!t_queue_find_custom(&ret_streams, &fid, int64_cmp)) {
 					const char *ret = janus_videoroom_join_sub(handle, room, retcode, fid,
-						call, &srms);
+						call, &medias);
 					if (ret)
 						return ret;
 
@@ -614,10 +619,10 @@ static const char *janus_videoroom_join(struct websocket_message *wm, struct jan
 		json_reader_end_member(reader);
 
 		*retcode = 456;
-		if (!srms.length)
+		if (!medias.length)
 			return "No feeds to subscribe to given";
 
-		struct call_monologue *dest_ml = janus_get_monologue(handle->id, call,
+		struct call_monologue *dest_ml = janus_get_monologue(handle->id, call, &room->call_id,
 				call_get_or_create_monologue);
 
 		g_auto(sdp_ng_flags) flags;
@@ -635,7 +640,7 @@ static const char *janus_videoroom_join(struct websocket_message *wm, struct jan
 			flags.rtcp_mux_demux = 1;
 		}
 
-		int ret = monologue_subscribe_request(&srms, dest_ml, &flags);
+		int ret = monologue_subscribe_request(&medias, dest_ml, &flags);
 		if (ret)
 			return "Subscribe error";
 
@@ -857,7 +862,7 @@ static const char *janus_videoroom_configure(struct websocket_message *wm, struc
 		if (!sdp_streams(&parsed, &streams, &flags))
 			return "Incomplete SDP specification";
 
-		ml = janus_get_monologue(handle->id, call, call_get_or_create_monologue);
+		ml = janus_get_monologue(handle->id, call, &room->call_id, call_get_or_create_monologue);
 
 		// accept unsupported codecs if necessary
 		flags.accept_any = 1;
@@ -886,7 +891,7 @@ static const char *janus_videoroom_configure(struct websocket_message *wm, struc
 	}
 	else {
 		// reconfigure existing publisher
-		ml = janus_get_monologue(handle->id, call, call_get_monologue);
+		ml = janus_get_monologue(handle->id, call, NULL, janus_call_get_monologue);
 		if (!ml)
 			return "Not an existing publisher";
 	}
@@ -981,12 +986,12 @@ static const char *janus_videoroom_start(struct websocket_message *wm, struct ja
 	if (!feed_handle)
 		return "No such feed exists";
 
-	struct call_monologue *source_ml = janus_get_monologue(*feed_handle, call, call_get_monologue);
+	struct call_monologue *source_ml = janus_get_monologue(*feed_handle, call, NULL, janus_call_get_monologue);
 	if (!source_ml)
 		return "Feed not found";
 	// XXX verify that dest_ml is subscribed to source_ml
 
-	struct call_monologue *dest_ml = janus_get_monologue(handle->id, call, call_get_monologue);
+	struct call_monologue *dest_ml = janus_get_monologue(handle->id, call, NULL, janus_call_get_monologue);
 	if (!dest_ml)
 		return "Subscriber not found";
 
@@ -1042,7 +1047,7 @@ static const char *janus_videoroom_unpublish(struct websocket_message *wm, struc
 	// notify other publishers
 	janus_notify_publishers(room_id, handle->id, NULL, *feed_id, janus_notify_publishers_unpublished);
 
-	struct call_monologue *ml = janus_get_monologue(handle->id, call, call_get_monologue);
+	struct call_monologue *ml = janus_get_monologue(handle->id, call, NULL, janus_call_get_monologue);
 	if (ml)
 		monologue_destroy(ml);
 
@@ -1226,7 +1231,7 @@ void janus_rtc_up(struct call_monologue *ml) {
 		return;
 
 	// the monologue tag is the handle ID
-	uint64_t handle = str_to_ui(&ml->tag, 0);
+	uint64_t handle = str_to_ull(&ml->tag, 0);
 	if (!handle)
 		return;
 
@@ -1259,7 +1264,7 @@ void janus_media_up(struct call_media *media) {
 		return;
 
 	// the monologue tag is the handle ID
-	uint64_t handle = str_to_ui(&ml->tag, 0);
+	uint64_t handle = str_to_ull(&ml->tag, 0);
 	if (!handle)
 		return;
 
@@ -1361,7 +1366,7 @@ static void janus_destroy_handle(struct janus_handle *handle) {
 		call_t *call = call_get(&room->call_id);
 		if (call) {
 			// remove publisher monologue
-			struct call_monologue *ml = janus_get_monologue(handle_id, call, call_get_monologue);
+			struct call_monologue *ml = janus_get_monologue(handle_id, call, NULL, janus_call_get_monologue);
 			if (ml)
 				monologue_destroy(ml);
 
@@ -1378,7 +1383,7 @@ static void janus_destroy_handle(struct janus_handle *handle) {
 		call_t *call = call_get(&room->call_id);
 		if (call) {
 			// remove subscriber monologue
-			struct call_monologue *ml = janus_get_monologue(handle_id, call, call_get_monologue);
+			struct call_monologue *ml = janus_get_monologue(handle_id, call, NULL, janus_call_get_monologue);
 			if (ml)
 				monologue_destroy(ml);
 
@@ -1460,7 +1465,7 @@ static const char *janus_destroy(struct websocket_message *wm, JsonReader *reade
 	if (ht_session != session) {
 		if (ht_session) // return wrongly stolen session
 			t_hash_table_insert(janus_sessions, &ht_session->id, ht_session);
-		return "Sesssion ID not found"; // already removed/destroyed
+		return "Session ID not found"; // already removed/destroyed
 	}
 
 	janus_session_cleanup(session);
@@ -1956,10 +1961,10 @@ const char *websocket_janus_post(struct websocket_message *wm) {
 		goto done;
 	if (!str_token_sep(&s, &uri, '/'))
 		goto done;
-	session_id = str_to_ui(&s, 0);
+	session_id = str_to_ull(&s, 0);
 	if (!str_token_sep(&s, &uri, '/'))
 		goto done;
-	handle_id = str_to_ui(&s, 0);
+	handle_id = str_to_ull(&s, 0);
 
 done:
 	return websocket_janus_process_json(wm, session_id, handle_id);

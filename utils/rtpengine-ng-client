@@ -33,6 +33,7 @@ my @flags = qw(
 	original-sendrecv
 	symmetric-codecs
 	asymmetric-codecs
+	allow-asymmetric-codecs
 	inject-DTMF
 	detect-DTMF
 	generate-RTCP
@@ -55,6 +56,12 @@ my @flags = qw(
 	block-egress
 	directional
 	allow-no-codec-media
+	bidirectional
+	mix
+	unsubscribe
+	strip-extmap
+	fatal
+	fast
 );
 
 my @string_opts = qw(
@@ -143,7 +150,6 @@ my @codec_opts = qw(
 
 my @replace_opts = qw(
 	origin
-	session-connection
 	sdp-version
 	username
 	session-name

@@ -4,7 +4,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <mysql.h>
-#include "log.h"
+#include "log_r.h"
 #include "main.h"
 #include "garbage.h"
 #include "db.h"
@@ -35,7 +35,6 @@ void epoll_del(int fd) {
 
 static void poller_thread_end(void *ptr) {
 	mysql_thread_end();
-	db_thread_end();
 }
 
 

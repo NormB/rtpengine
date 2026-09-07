@@ -1,23 +1,16 @@
 #include "media_socket.h"
 
-#include <stdio.h>
-#include <string.h>
-#include <glib.h>
 #include <errno.h>
 #include <netinet/in.h>
 
-#include "str.h"
 #include "ice.h"
-#include "socket.h"
 #include "redis.h"
 #include "rtp.h"
-#include "ice.h"
 #include "stun.h"
 #include "kernel.h"
 #include "rtcp.h"
 #include "sdp.h"
-#include "helpers.h"
-#include "log_funcs.h"
+#include "log_d.h"
 #include "poller.h"
 #include "recording.h"
 #include "rtplib.h"
@@ -25,15 +18,12 @@
 #include "ssrc.h"
 #include "iptables.h"
 #include "main.h"
-#include "codec.h"
 #include "media_player.h"
 #include "jitter_buffer.h"
 #include "dtmf.h"
 #include "mqtt.h"
 #include "janus.h"
 #include "bufferpool.h"
-
-#include "nft_rtpengine.h"
 
 #ifndef PORT_RANDOM_MIN
 #define PORT_RANDOM_MIN 6
@@ -99,6 +89,7 @@ struct interface_stats_interval {
 	struct interface_stats_block stats;
 	int64_t last_run;
 };
+
 
 
 /* thread scope (local) queue for sockets to be released, only appending here */
@@ -474,7 +465,7 @@ static int has_free_ports_loc(struct local_intf *loc, unsigned int num_ports) {
 		return 0;
 	}
 
-	__C_DBG("Found %d ports available for " STR_FORMAT "/%s from total of %u free ports",
+	dbg_int("Found %d ports available for " STR_FORMAT "/%s from total of %u free ports",
 		num_ports, STR_FMT(&loc->logical->name),
 		sockaddr_print_buf(&loc->spec->local_address.addr),
 		loc->spec->port_pool.free_ports_q.length);
@@ -541,7 +532,7 @@ static struct logical_intf* run_round_robin_calls(struct intf_rr *rr, unsigned i
 
 		mutex_unlock(&rr->lock);
 
-		__C_DBG("Trying %d ports on logical interface " STR_FORMAT, num_ports, STR_FMT(&log->name));
+		dbg_int("Trying %d ports on logical interface " STR_FORMAT, num_ports, STR_FMT(&log->name));
 
 		if (has_free_ports_log_all(log, num_ports))
 			goto done;
@@ -557,7 +548,7 @@ done:
 		ilog(LOG_ERR, "No logical interface with free ports found; fallback to default behaviour");
 		return NULL;
 	}
-	__C_DBG("Round Robin Calls algorithm found logical " STR_FORMAT, STR_FMT(&log->name));
+	dbg_int("Round Robin Calls algorithm found logical " STR_FORMAT, STR_FMT(&log->name));
 	return log;
 }
 
@@ -566,7 +557,7 @@ struct logical_intf *get_logical_interface(const str *name, sockfamily_t *fam, i
 	struct logical_intf *log = NULL;
 	int rr_use_default_intf = 0;
 
-	__C_DBG("Get logical interface for %d ports", num_ports);
+	dbg_int("Get logical interface for %d ports", num_ports);
 
 	if (G_UNLIKELY(!name || !name->s)) {
 		// trivial case: no interface given. just pick one suitable for the address family.
@@ -617,14 +608,14 @@ got_some:
 	if (!rr)
 		return name ? __get_logical_interface(name, fam) : log;
 	if (rr->singular) {
-		__C_DBG("Returning non-RR logical interface '" STR_FORMAT "' based on direction '" \
+		dbg_int("Returning non-RR logical interface '" STR_FORMAT "' based on direction '" \
 					STR_FORMAT "'",
 				STR_FMT(&rr->singular->name),
 				STR_FMT(name));
 		return rr->singular;
 	}
 
-	__C_DBG("Running RR interface selection for direction '" STR_FORMAT "'",
+	dbg_int("Running RR interface selection for direction '" STR_FORMAT "'",
 			STR_FMT(name));
 
 	log = run_round_robin_calls(rr, num_ports);
@@ -643,11 +634,11 @@ static struct logical_intf *__get_logical_interface(const str *name, sockfamily_
 
 	log = t_hash_table_lookup(__logical_intf_name_family_hash, &d);
 	if (log) {
-		__C_DBG("Choose logical interface " STR_FORMAT " because of direction " STR_FORMAT,
+		dbg_int("Choose logical interface " STR_FORMAT " because of direction " STR_FORMAT,
 			STR_FMT(&log->name),
 			STR_FMT(name));
 	} else {
-		__C_DBG("Choose logical interface NULL because of direction " STR_FORMAT,
+		dbg_int("Choose logical interface NULL because of direction " STR_FORMAT,
 			STR_FMT(name));
 	}
 
@@ -784,16 +775,16 @@ static void release_reserved_port(struct port_pool *pp, ports_q *list, unsigned 
 
 			assert(port == GPOINTER_TO_UINT(t_queue_peek_head(list)));
 
-			pp = l->data;
-			if (!port_is_in_range(pp, port))
+			struct port_pool *opp = l->data;
+			if (!port_is_in_range(opp, port))
 				continue;
 
 			// remove top link from list
 			link = t_queue_pop_head_link(list);
 
-			LOCK(&pp->free_list_lock);
-			t_queue_push_tail_link(&pp->free_ports_q, link);
-			free_ports_link(pp, port) = link;
+			LOCK(&opp->free_list_lock);
+			t_queue_push_tail_link(&opp->free_ports_q, link);
+			free_ports_link(opp, port) = link;
 		}
 	}
 }
@@ -801,6 +792,7 @@ static void release_reserved_port(struct port_pool *pp, ports_q *list, unsigned 
 static void release_reserved_ports(socket_port_q *ports) {
 	while (ports->length) {
 		__auto_type p = i_queue_pop_head(ports);
+		close_socket(&p->socket);
 		if (p->links.length)
 			release_reserved_port(p->pp, &p->links, GPOINTER_TO_UINT(p->links.head->data));
 		g_free(p);
@@ -828,7 +820,7 @@ static void __append_free_ports_to_int(struct intf_spec *spec) {
 		return;
 	}
 
-	int port_values[ports_amount];
+	unsigned int *port_values = g_new(unsigned int, ports_amount);
 
 	/* create an array to store the initial values within the range */
 	for (int i = 0; i < ports_amount; i++)
@@ -853,6 +845,8 @@ static void __append_free_ports_to_int(struct intf_spec *spec) {
 		port_values[j] = port_values[count - 1];
 		count--;
 	}
+
+	g_free(port_values);
 }
 // called during single-threaded startup only
 static void __add_intf_rr_1(struct logical_intf *lif, str *name_base, sockfamily_t *fam) {
@@ -948,7 +942,10 @@ static void __interface_append(struct intf_config *ifa, sockfamily_t *fam, bool 
 		// create one if not found
 		if (ifa->port_min == 0 || ifa->port_max == 0 || ifa->port_min > 65535
 				|| ifa->port_max > 65535 || ifa->port_min > ifa->port_max)
-			die("Invalid RTP port range (%d > %d)", ifa->port_min, ifa->port_max);
+		{
+			die("Invalid RTP port range (%u-%u): it must be within 1-65535 and min < max",
+					ifa->port_min, ifa->port_max);
+		}
 
 		spec = g_new0(__typeof(*spec), 1);
 		spec->local_address = ifa->local_address;
@@ -958,13 +955,15 @@ static void __interface_append(struct intf_config *ifa, sockfamily_t *fam, bool 
 
 		mutex_init(&spec->port_pool.free_list_lock);
 
-		/* pre-fill the range of used ports */
+		/* pre-fill the range of free ports */
 		__append_free_ports_to_int(spec);
 
 		for (GList *l = ifa->exclude_ports; l; l = l->next) {
 			unsigned int port = GPOINTER_TO_UINT(l->data);
-			if (port > 65535)
+			if (port > 65535) {
+				ilog(LOG_WARNING, "Ignoring invalid excluded RTP port %u", port);
 				continue;
+			}
 			reserve_port(&spec->port_pool, port);
 		}
 
@@ -988,7 +987,7 @@ static void __interface_append(struct intf_config *ifa, sockfamily_t *fam, bool 
 	ifc->advertised_address = ifa->advertised_address;
 	ifc->spec = spec;
 	ifc->logical = lif;
-	ifc->stats = bufferpool_alloc0(shm_bufferpool, sizeof(*ifc->stats));
+	ifc->stats = bufferpool_alloc0(static_bufferpool, sizeof(*ifc->stats));
 
 	t_queue_push_tail(&all_local_interfaces, ifc);
 
@@ -1079,15 +1078,15 @@ struct local_intf *get_any_interface_address(const struct logical_intf *lif, soc
  * It doesn't provide a port selection logic.
  */
 static bool add_socket(socket_t *r, unsigned int port, struct intf_spec *spec, const str *label) {
-	__C_DBG("An attempt to open a socket for the port: '%u'", port);
+	dbg_int("An attempt to open a socket for the port: '%u'", port);
 
 	if (!open_socket(r, SOCK_DGRAM, port, &spec->local_address.addr)) {
-		__C_DBG("Can't open a socket for the port: '%d'", port);
+		dbg_int("Can't open a socket for the port: '%d'", port);
 		return false;
 	}
 	iptables_add_rule(r, label);
 	socket_timestamping(r);
-	__C_DBG("A socket is successfully bound for the port: '%u'", port);
+	dbg_int("A socket is successfully bound for the port: '%u'", port);
 	return true;
 }
 /**
@@ -1095,7 +1094,7 @@ static bool add_socket(socket_t *r, unsigned int port, struct intf_spec *spec, c
  */
 static void release_port_push(void *p) {
 	struct late_port_release *lpr = p;
-	__C_DBG("Adding the port '%u' to late-release list", lpr->socket.local.port);
+	dbg_int("Adding the port '%u' to late-release list", lpr->socket.local.port);
 	t_queue_push_tail_link(&ports_to_release, &lpr->link);
 }
 static void release_port_poller(struct socket_port_link *spl, struct poller *poller) {
@@ -1109,17 +1108,14 @@ static void release_port_poller(struct socket_port_link *spl, struct poller *pol
 	if (!poller)
 		release_port_push(lpr);
 	else {
-		__C_DBG("Adding late-release callback for port '%u'", lpr->socket.local.port);
+		dbg_int("Adding late-release callback for port '%u'", lpr->socket.local.port);
 		rtpe_poller_del_item_callback(poller, lpr->socket.fd, release_port_push, lpr);
 	}
 }
 static void release_port(struct socket_port_link *spl) {
 	release_port_poller(spl, NULL);
 }
-static void free_port(struct socket_port_link *spl) {
-	release_port(spl);
-	g_free(spl);
-}
+
 /**
  * Logic responsible for devastating the `ports_to_release` queue.
  * It's being called by main poller.
@@ -1127,10 +1123,10 @@ static void free_port(struct socket_port_link *spl) {
 static void release_port_now(socket_t *r, ports_q *list, struct port_pool *pp) {
 	unsigned int port = r->local.port;
 
-	__C_DBG("Trying to release the port '%u'", port);
+	dbg_int("Trying to release the port '%u'", port);
 
 	if (close_socket(r)) {
-		__C_DBG("A socket for the '%u' has been closed", port);
+		dbg_int("A socket for the '%u' has been closed", port);
 
 		iptables_del_rule(r);
 
@@ -1212,7 +1208,6 @@ static bool open_port_link_sockets(socket_port_q *out, struct intf_spec *spec, c
 		if (!add_socket(&spl->socket, port, spec, label)) {
 			/* if something has been left in the `ports_to_engage` queue, release it right away */
 			release_reserved_ports(out);
-			/* ports which are already bound to a socket, will be freed by `free_port()` */
 			return false;
 		}
 	}
@@ -1224,9 +1219,12 @@ struct socket_port_link get_specific_port(unsigned int port,
 {
 	if (!port_is_in_range(&spec->port_pool, port)) {
 		ilog(LOG_DEBUG, "A specific out-of-pool port is requested: '%d'", port);
-		struct socket_port_link spl = {0};
-		add_socket(&spl.socket, port, spec, label);
-		return spl;
+
+		struct socket_port_link spl = { .socket = { .fd = -1 } };
+		if (add_socket(&spl.socket, port, spec, label))
+			return spl;
+
+		return (struct socket_port_link) { .socket = { .fd = -1 } };
 	}
 
 	ilog(LOG_DEBUG, "A specific in-pool port is requested: '%d'", port);
@@ -1382,13 +1380,6 @@ bool get_consecutive_ports(socket_port_q *out, unsigned int num_ports, struct lo
 	return __get_consecutive_ports(out, num_ports, loc->spec, label);
 }
 
-void free_socket_intf_list(struct socket_intf_list *il) {
-	struct socket_port_link *spl;
-
-	while ((spl = i_queue_pop_head(&il->list)))
-		free_port(spl);
-	g_free(il);
-}
 void free_sfd_intf_list(struct sfd_intf_list *il) {
 	t_queue_clear(&il->list);
 	g_free(il);
@@ -1581,6 +1572,8 @@ static const char *kernelize_target(kernelize_state *s, struct packet_stream *st
 		s->non_forwarding = true;
 
 	stream_fd *sfd = stream->selected_sfd;
+	if (!sfd || !sfd->socket.family)
+		return "socket not open";
 
 	ilog(LOG_INFO, "Kernelizing media stream: remote %s%s%s -> local %s",
 			FMT_M(endpoint_print_buf(&stream->endpoint)),
@@ -1589,12 +1582,14 @@ static const char *kernelize_target(kernelize_state *s, struct packet_stream *st
 	// fill input
 	__auto_type reti = &s->reti.target;
 
-	if (PS_ISSET2(stream, STRICT_SOURCE, MEDIA_HANDOVER)) {
+	reti->stun = MEDIA_ISSET(media, ICE) && media->ice_agent ? 1 : 0;
+
+	if (PS_ISSET2(stream, STRICT_SOURCE, MEDIA_HANDOVER) || reti->stun) {
 		__re_address_translate_ep(&reti->expected_src, MEDIA_ISSET(media, ASYMMETRIC) ? &stream->learned_endpoint : &stream->endpoint);
-		if (PS_ISSET(stream, STRICT_SOURCE))
-			reti->src_mismatch = MSM_DROP;
-		else if (PS_ISSET(stream, MEDIA_HANDOVER))
+		if (PS_ISSET(stream, MEDIA_HANDOVER) || reti->stun)
 			reti->src_mismatch = MSM_PROPAGATE;
+		else if (PS_ISSET(stream, STRICT_SOURCE))
+			reti->src_mismatch = MSM_DROP;
 	}
 
 	__re_address_translate_ep(&reti->local, &sfd->socket.local);
@@ -1602,11 +1597,15 @@ static const char *kernelize_target(kernelize_state *s, struct packet_stream *st
 	reti->stats = stream->stats_in;
 	reti->rtcp = PS_ISSET(stream, RTCP);
 	reti->dtls = MEDIA_ISSET(media, DTLS);
-	reti->stun = media->ice_agent ? 1 : 0;
 	reti->non_forwarding = s->non_forwarding ? 1 : 0;
 	reti->blackhole = s->blackhole ? 1 : 0;
 	reti->rtp_stats = (rtpe_config.measure_rtp
 			|| MEDIA_ISSET(media, RTCP_GEN) || (mqtt_publish_scope() != MPS_NONE)) ? 1 : 0;
+
+	reti->raw_ring_buf.start_idx = kernel_poller_start_idx;
+	reti->raw_ring_buf.num = kernel_pollers_num;
+	reti->raw_ring_buf.opaque = sfd; // ref held after kernel_add_stream()
+	reti->raw_ring_buf.opaque_ref = &sfd->obj.ref;
 
 	// Grab the first stream handler for our decryption function.
 	// determine_sink_handler is in charge of only returning a NULL decrypter if it is
@@ -1631,13 +1630,20 @@ static const char *kernelize_target(kernelize_state *s, struct packet_stream *st
 		// nothing to forward
 		s->non_forwarding = true;
 		s->blackhole = true;
+		reti->non_forwarding = 1;
+		reti->decrypt.cipher = REC_NULL;
+		reti->decrypt.hmac = REH_NULL;
 		return NULL;
 	}
 
 	if (!handler->in->kernel)
 		return "protocol not supported by kernel module";
 
-	handler->in->kernel(&reti->decrypt, stream);
+	int ret = handler->in->kernel(&reti->decrypt, stream);
+	if (ret) {
+		ilog(LOG_NOTICE, "Decryption SRTP not yet negotiated");
+		return "";
+	}
 	if (!reti->decrypt.cipher || !reti->decrypt.hmac)
 		return "decryption cipher or HMAC not supported by kernel module";
 
@@ -1772,8 +1778,17 @@ static const char *kernelize_one(kernelize_state *s,
 	if (MEDIA_ISSET(sink_media, BLOCK_EGRESS))
 		return NULL;
 
-	if (!sink->endpoint.address.family)
+	/* XXX nested lock, avoid possible deadlock. should be reworked not to
+	 * require a nested lock */
+	if (sink != stream && mutex_trylock(&sink->lock)) {
+		return ""; // indicate deadlock
+	}
+
+	if (!sink->endpoint.address.family) {
+		if (sink != stream)
+			mutex_unlock(&sink->lock);
 		return NULL;
+	}
 
 	if (sink->selected_sfd)
 		ilog(LOG_INFO, "Kernelizing media stream: %s%s%s -> %s | %s -> %s%s%s",
@@ -1788,16 +1803,25 @@ static const char *kernelize_one(kernelize_state *s,
 
 	const struct streamhandler *handler = determine_sink_handler(stream, sink_handler);
 
-	if (!handler->out->kernel)
+	if (!handler->out->kernel) {
+		if (sink != stream)
+			mutex_unlock(&sink->lock);
 		return "protocol not supported by kernel module";
+	}
 
 	__auto_type reti = &s->reti.target;
 
 	// any output at all?
-	if (s->non_forwarding || !sink->selected_sfd)
+	if (s->non_forwarding || !sink->selected_sfd || !sink->selected_sfd->socket.family) {
+		if (sink != stream)
+			mutex_unlock(&sink->lock);
 		return NULL; // no output
-	if (!PS_ISSET(sink, FILLED))
+	}
+	if (!PS_ISSET(sink, FILLED)) {
+		if (sink != stream)
+			mutex_unlock(&sink->lock);
 		return NULL;
+	}
 
 	// fill output struct
 	__auto_type credi = g_new0(struct rtpengine_command_destination, 1);
@@ -1838,13 +1862,6 @@ static const char *kernelize_one(kernelize_state *s,
 	if (MEDIA_ISSET(media, ECHO) || sink_handler->attrs.transcoding)
 		redi->output.ssrc_subst = 1;
 
-	// XXX nested lock, avoid possible deadlock. should be reworked not to
-	// require a nested lock
-	if (sink != stream && mutex_trylock(&sink->lock)) {
-		g_free(credi);
-		return ""; // indicate deadlock
-	}
-
 	__re_address_translate_ep(&redi->output.dst_addr, &sink->endpoint);
 	__re_address_translate_ep(&redi->output.src_addr, &sink->selected_sfd->socket.local);
 	redi->output.iface_stats = sink->selected_sfd->local_intf->stats;
@@ -1868,7 +1885,14 @@ static const char *kernelize_one(kernelize_state *s,
 		}
 	}
 
-	handler->out->kernel(&redi->output.encrypt, sink);
+	int ret = handler->out->kernel(&redi->output.encrypt, sink);
+	if (ret) {
+		if (sink != stream)
+			mutex_unlock(&sink->lock);
+		g_free(credi);
+		ilog(LOG_NOTICE, "Encryption SRTP not yet negotiated");
+		return NULL;
+	}
 	sink_handler->rtpext->kernel(&redi->output, media, sink_media);
 
 	if (sink != stream)
@@ -1926,7 +1950,7 @@ static void kernelize(struct packet_stream *stream) {
 
 	LOCK(&stream->lock);
 
-	if (!stream->selected_sfd)
+	if (!stream->selected_sfd || !stream->selected_sfd->socket.family)
 		goto no_kernel;
 
 	{
@@ -1940,8 +1964,11 @@ static void kernelize(struct packet_stream *stream) {
 		goto no_kernel;
 	if (!kernel.is_wanted)
 		goto no_kernel;
-	if (!kernel.is_open)
-		goto no_kernel_warn;
+	if (!kernel.is_open) {
+		ilog(LOG_WARNING, "No support for kernel packet forwarding available "
+				"(interface to kernel module not open)");
+		goto no_kernel;
+	}
 	if (MEDIA_ISSET(media, GENERATOR))
 		goto no_kernel;
 	if (ML_ISSET(media->monologue, BLOCK_MEDIA) || CALL_ISSET(call, BLOCK_MEDIA))
@@ -1950,8 +1977,11 @@ static void kernelize(struct packet_stream *stream) {
 		goto no_kernel;
 
 	const char *err = kernelize_target(&s, stream);
-	if (err)
-		ilog(LOG_WARNING, "No support for kernel packet forwarding available (%s)", err);
+	if (err) {
+		if (*err)
+			ilog(LOG_WARNING, "No support for kernel packet forwarding available (%s)", err);
+		goto no_kernel;
+	}
 
 	__auto_type reti = &s.reti.target;
 
@@ -2001,7 +2031,9 @@ static void kernelize(struct packet_stream *stream) {
 				"lack of sinks");
 	}
 
-	kernel_add_stream(&s.reti);
+	if (kernel_add_stream(&s.reti))
+		obj_hold(stream->selected_sfd); // ref in reti.target.raw_ring_buf.opaque
+
 	struct rtpengine_command_destination *redi;
 	while ((redi = t_queue_pop_head(&s.outputs))) {
 		kernel_add_destination(redi);
@@ -2015,11 +2047,10 @@ static void kernelize(struct packet_stream *stream) {
 
 	return;
 
-no_kernel_warn:
-	ilog(LOG_WARNING, "No support for kernel packet forwarding available "
-			"(interface to kernel module not open)");
 no_kernel:
 	stream->kernel_time_us = rtpe_now;
+	if (stream->selected_sfd)
+		stream->selected_sfd->kernelized = true;
 	PS_SET(stream, NO_KERNEL_SUPPORT);
 	return;
 
@@ -2057,22 +2088,24 @@ struct ssrc_entry_call *__hunt_ssrc_ctx(uint32_t ssrc, struct ssrc_entry_call *l
 void __unkernelize(struct packet_stream *p, const char *reason) {
 	stream_fd *sfd = p->selected_sfd;
 
-	if (!sfd)
+	bool no_supp = PS_CLEAR(p, NO_KERNEL_SUPPORT);
+
+	if (!sfd || !sfd->socket.family)
 		return;
 	if (!sfd->kernelized)
 		return;
 
-	if (kernel.is_open && !PS_ISSET(p, NO_KERNEL_SUPPORT)) {
+	if (kernel.is_open && !no_supp) {
 		ilog(LOG_INFO, "Removing media stream from kernel: local %s (%s)",
 				endpoint_print_buf(&sfd->socket.local),
 				reason);
 		struct rtpengine_command_del_target cmd = {0};
 		__re_address_translate_ep(&cmd.local, &sfd->socket.local);
-		kernel_del_stream(&cmd);
+		if (kernel_del_stream(&cmd))
+			obj_put(sfd); // raw_ring_buf ref
 	}
 
 	sfd->kernelized = false;
-	PS_CLEAR(p, NO_KERNEL_SUPPORT);
 }
 
 
@@ -2297,6 +2330,8 @@ static const struct rtpext_printer rtpext_printer_extmap = {
 static bool extmap_short_is_valid_data(unsigned int id, size_t len) {
 	// valid ranges for short form?
 	if (id <= 0 || id >= 15)
+		return false;
+	if (len == 0)
 		return false;
 	if (len > 16)
 		return false;
@@ -2705,7 +2740,18 @@ static int media_loop_detect(struct packet_handler_ctx *phc) {
 		if (memcmp(phc->mp.stream->lp_buf[i].buf, phc->s.s, MIN(phc->s.len, RTP_LOOP_PROTECT)))
 			continue;
 
-		__C_DBG("packet dupe");
+		dbg_int("packet dupe");
+
+		/* not a loop if duplicates arrive more than 1s apart */
+		if (rtpe_now - phc->mp.stream->lp_buf[i].recv_us > 1000000LL) {
+			dbg_int("duplicate packet too old to indicate a loop, resetting count");
+			phc->mp.stream->lp_count = 0;
+			phc->mp.stream->lp_buf[i].recv_us = rtpe_now;
+			return 0;
+		}
+
+		phc->mp.stream->lp_buf[i].recv_us = rtpe_now;
+
 		if (phc->mp.stream->lp_count >= RTP_LOOP_MAX_COUNT) {
 			ilog(LOG_WARNING, "More than %d duplicate packets detected, dropping packet from %s%s%s"
 					"to avoid potential loop",
@@ -2722,6 +2768,7 @@ static int media_loop_detect(struct packet_handler_ctx *phc) {
 	phc->mp.stream->lp_count = 0;
 	phc->mp.stream->lp_buf[phc->mp.stream->lp_idx].len = phc->s.len;
 	memcpy(phc->mp.stream->lp_buf[phc->mp.stream->lp_idx].buf, phc->s.s, MIN(phc->s.len, RTP_LOOP_PROTECT));
+	phc->mp.stream->lp_buf[phc->mp.stream->lp_idx].recv_us = rtpe_now;
 	phc->mp.stream->lp_idx = (phc->mp.stream->lp_idx + 1) % RTP_LOOP_PACKETS;
 
 	return 0;
@@ -2845,6 +2892,8 @@ static void rtp_ext_mid_kernel(kernelize_state *s, unsigned int component, struc
 	if (!bundle)
 		return;
 	if (!bundle->extmap_id[RTP_EXT_MID])
+		return;
+	if (!media->extmap_id[RTP_EXT_MID])
 		return;
 	if (bundle->extmap_id[RTP_EXT_MID]->id != media->extmap_id[RTP_EXT_MID]->id)
 		return;
@@ -2980,6 +3029,9 @@ static void media_packet_rtp_in(struct packet_handler_ctx *phc) {
 	if (unkern)
 		phc->unkernelize = unkern;
 
+	if (!phc->mp.ssrc_in)
+		return;
+
 	if (phc->mp.media->bundle) {
 		if (phc->media_set)
 			phc->mp.ssrc_in->media = phc->mp.media;
@@ -3067,7 +3119,7 @@ int media_packet_encrypt(rewrite_func encrypt_func, struct packet_stream *out, s
 	LOCK(&out->lock);
 
 	IQUEUE_FOREACH(&mp->packets_out, p) {
-		if (mp->call->recording && rtpe_config.rec_egress && CALL_ISSET(mp->call, RECORDING_ON)) {
+		if (mp->call->recording && (rtpe_config.rec_egress || rtpe_config.rec_both) && CALL_ISSET(mp->call, RECORDING_ON)) {
 			p->plain = STR_LEN(bufferpool_alloc(media_bufferpool, p->s.len), p->s.len);
 			memcpy(p->plain.s, p->s.s, p->s.len);
 			p->plain_free_func = bufferpool_unref;
@@ -3112,14 +3164,16 @@ static bool media_packet_address_check(struct packet_handler_ctx *phc)
 	 * in the other direction. */
 	/* if the other side hasn't been signalled yet, just forward the packet */
 	if (!PS_ISSET(phc->mp.stream, FILLED)) {
-		__C_DBG("stream %s:%d not FILLED", sockaddr_print_buf(&phc->mp.stream->endpoint.address),
+		dbg_int("stream %s:%d not FILLED", sockaddr_print_buf(&phc->mp.stream->endpoint.address),
 				phc->mp.stream->endpoint.port);
 		return false;
 	}
 	if (!MEDIA_ISSET(phc->mp.media, PUBLIC)) {
-		__C_DBG("media not answered");
+		dbg_int("media not answered");
 		return false;
 	}
+
+	bool has_ice = MEDIA_ISSET(phc->mp.media, ICE) && phc->mp.media->ice_agent;
 
 	// GH #697 - apparent Asterisk bug where it sends stray RTCP to the RTP port.
 	// work around this by detecting this situation and ignoring the packet for
@@ -3134,14 +3188,12 @@ static bool media_packet_address_check(struct packet_handler_ctx *phc)
 		}
 	}
 
-	PS_SET(phc->mp.stream, RECEIVED);
-
 	endpoint_t *update_endpoint = &phc->mp.stream->endpoint;
 	// don't update the "to" address endpoint for asymmetric streams
 	if (MEDIA_ISSET(phc->mp.media, ASYMMETRIC))
 		update_endpoint = &phc->mp.stream->learned_endpoint;
 
-	if (phc->mp.stream->el_flags == EL_OFF)
+	if (phc->mp.stream->el_flags == EL_OFF || has_ice)
 		phc->mp.sfd->confirmed = true;
 
 	/* confirm sinks for unidirectional streams in order to kernelize */
@@ -3153,13 +3205,28 @@ static bool media_packet_address_check(struct packet_handler_ctx *phc)
 		}
 	}
 
+	/* wait at least 3 seconds after last signal before committing to a particular
+	 * endpoint address */
+	bool wait_time = false;
+	if (!phc->mp.call->last_signal_us || rtpe_now <= phc->mp.call->last_signal_us + 3000000LL)
+		wait_time = true;
+
 	/* if we have already updated the endpoint in the past ... */
 	if (phc->mp.sfd->confirmed) {
 		/* see if we need to compare the source address with the known endpoint */
-		if (PS_ISSET2(phc->mp.stream, STRICT_SOURCE, MEDIA_HANDOVER)) {
-			bool matched = memcmp(&phc->mp.fsin, update_endpoint, sizeof(phc->mp.fsin)) == 0;
+		if (PS_ISSET2(phc->mp.stream, STRICT_SOURCE, MEDIA_HANDOVER) || has_ice) {
+			bool matched = memcmp(&phc->mp.fsin, update_endpoint, sizeof(phc->mp.fsin)) == 0
+				&& phc->mp.sfd == phc->mp.stream->selected_sfd;
 
-			if (!matched && PS_ISSET(phc->mp.stream, MEDIA_HANDOVER)) {
+			if (!matched && has_ice) {
+				// rate-limit for ICE to avoid rapid flip-flop
+				if (wait_time)
+					matched = true;
+				else
+					phc->mp.call->last_signal_us = rtpe_now;
+			}
+
+			if (!matched && (PS_ISSET(phc->mp.stream, MEDIA_HANDOVER) || has_ice)) {
 				/* out_lock remains locked */
 				ilog(LOG_INFO | LOG_FLAG_LIMIT, "Peer address changed to %s%s%s",
 						FMT_M(endpoint_print_buf(&phc->mp.fsin)));
@@ -3173,17 +3240,21 @@ static bool media_packet_address_check(struct packet_handler_ctx *phc)
 			// try some other options before dropping
 			if (!matched && !MEDIA_ISSET(phc->mp.media, ASYMMETRIC))
 				matched = memcmp(&phc->mp.fsin, &phc->orig_stream->endpoint,
-						sizeof(phc->mp.fsin)) == 0;
+						sizeof(phc->mp.fsin)) == 0
+					&& phc->mp.sfd == phc->mp.stream->selected_sfd;
 			if (!matched)
 				matched = memcmp(&phc->mp.fsin, &phc->orig_stream->learned_endpoint,
-						sizeof(phc->mp.fsin)) == 0;
+						sizeof(phc->mp.fsin)) == 0
+					&& phc->mp.sfd == phc->mp.stream->selected_sfd;
 
 			if (!matched && PS_ISSET(phc->mp.stream, STRICT_SOURCE)) {
 				ilog(LOG_INFO | LOG_FLAG_LIMIT, "Drop due to strict-source attribute; "
-						"got %s%s%s, "
-						"expected %s%s%s",
+						"got %s%s%s -> %s, "
+						"expected %s%s%s -> %s",
 					FMT_M(endpoint_print_buf(&phc->mp.fsin)),
-					FMT_M(endpoint_print_buf(update_endpoint)));
+					endpoint_print_buf(&phc->mp.sfd->socket.local),
+					FMT_M(endpoint_print_buf(update_endpoint)),
+					endpoint_print_buf(&phc->mp.stream->selected_sfd->socket.local));
 				atomic64_inc_na(&phc->mp.stream->stats_in->errors);
 				atomic64_inc_na(&phc->mp.sfd->local_intf->stats->in.errors);
 				ret = true;
@@ -3193,15 +3264,9 @@ static bool media_packet_address_check(struct packet_handler_ctx *phc)
 		return ret;
 	}
 
-	/* wait at least 3 seconds after last signal before committing to a particular
-	 * endpoint address */
-	bool wait_time = false;
-	if (!phc->mp.call->last_signal_us || rtpe_now <= phc->mp.call->last_signal_us + 3000000LL)
-		wait_time = true;
-
 	const struct endpoint *use_endpoint_confirm = &phc->mp.fsin;
 
-	if (phc->mp.stream->el_flags == EL_IMMEDIATE)
+	if (phc->mp.stream->el_flags == EL_IMMEDIATE || has_ice)
 		goto confirm_now;
 
 	if (phc->mp.stream->el_flags == EL_HEURISTIC
@@ -3313,12 +3378,12 @@ update_addr:
 
 static void media_packet_kernel_check(struct packet_handler_ctx *phc) {
 	if (PS_ISSET(phc->mp.stream, NO_KERNEL_SUPPORT)) {
-		__C_DBG("stream %s%s%s NO_KERNEL_SUPPORT", FMT_M(endpoint_print_buf(&phc->mp.stream->endpoint)));
+		dbg_int("stream %s%s%s NO_KERNEL_SUPPORT", FMT_M(endpoint_print_buf(&phc->mp.stream->endpoint)));
 		return;
 	}
 
 	if (!phc->mp.sfd->confirmed) {
-		__C_DBG("stream %s%s%s not CONFIRMED", FMT_M(endpoint_print_buf(&phc->mp.stream->endpoint)));
+		dbg_int("stream %s%s%s not CONFIRMED", FMT_M(endpoint_print_buf(&phc->mp.stream->endpoint)));
 		return;
 	}
 
@@ -3447,7 +3512,7 @@ static int stream_packet(struct packet_handler_ctx *phc) {
 	phc->mp.stream = phc->mp.sfd->stream;
 	if (G_UNLIKELY(!phc->mp.stream))
 		goto out;
-	__C_DBG("Handling packet on: %s", endpoint_print_buf(&phc->mp.stream->endpoint));
+	dbg_int("Handling packet on: %s", endpoint_print_buf(&phc->mp.stream->endpoint));
 
 
 	phc->mp.media = phc->mp.stream->media;
@@ -3466,7 +3531,10 @@ static int stream_packet(struct packet_handler_ctx *phc) {
 	if (stun_ret == 0) // packet processed
 		goto out;
 	if (stun_ret == 1) {
-		media_packet_kernel_check(phc);
+		phc->kernelize = true;
+		phc->unkernelize_subscriptions = true;
+		phc->unkernelize = "ICE negotiation event";
+		phc->update = true;
 		goto drop;
 	}
 
@@ -3496,6 +3564,8 @@ static int stream_packet(struct packet_handler_ctx *phc) {
 
 	if (media_packet_address_check(phc))
 		goto drop;
+
+	PS_SET(phc->mp.stream, RECEIVED);
 
 	if (rtpe_config.active_switchover && IS_FOREIGN_CALL(phc->mp.call))
 		call_make_own_foreign(phc->mp.call, false);
@@ -3540,7 +3610,8 @@ static int stream_packet(struct packet_handler_ctx *phc) {
 	}
 
 	// If recording pcap dumper is set, then we record the call.
-	if (phc->mp.call->recording && !rtpe_config.rec_egress)
+	phc->mp.recording_egress = false;
+	if (phc->mp.call->recording && (!rtpe_config.rec_egress || rtpe_config.rec_both))
 		dump_packet(&phc->mp, &phc->s);
 
 	phc->mp.raw = phc->s;
@@ -3723,18 +3794,16 @@ next:
 		ssrc_entry_release(phc->mp.ssrc_out);
 	}
 
-	///////////////// INGRESS POST-PROCESSING HANDLING
-
-	if (phc->unkernelize) // for RTCP packet index updates
-		unkernelize(phc->mp.stream, phc->unkernelize);
-	if (phc->kernelize)
-		media_packet_kernel_check(phc);
-
 drop:
 	ret = 0;
 	handler_ret = 0;
 
 out:
+	if (phc->unkernelize)
+		unkernelize(phc->mp.stream, phc->unkernelize);
+	if (phc->kernelize)
+		media_packet_kernel_check(phc);
+
 	if (phc->unconfirm) {
 		stream_unconfirm(phc->mp.stream, "peer address unconfirmed");
 		unconfirm_sinks(&phc->mp.stream->rtp_sinks, "peer address unconfirmed");
@@ -3745,7 +3814,7 @@ out:
 			__auto_type sub_media = ms->media;
 			for (__auto_type m = sub_media->streams.head; m; m = m->next) {
 				struct packet_stream *sub_ps = m->data;
-				__unkernelize(sub_ps, "subscriptions modified");
+				unkernelize(sub_ps, "subscriptions modified");
 			}
 		}
 	}
@@ -3821,6 +3890,10 @@ static void stream_fd_readable(int fd, void *p) {
 				"discarding packet", strikes);
 		// Polling is edge-triggered so we won't immediately get here again.
 		// We could remove ourselves from the poller though. Maybe call stream_fd_closed?
+
+		// reset active_read_events to let other threads know
+		// there is no one handling this socket
+		g_atomic_int_set(&sfd->active_read_events, 0);
 		return;
 	}
 
@@ -3892,8 +3965,10 @@ done:
 	log_info_pop();
 }
 
-static void stream_fd_recv(struct obj *obj, char *buf, size_t len, const struct sockaddr *sa, int64_t tv) {
-	struct stream_fd *sfd = (struct stream_fd *) obj;
+static void __stream_fd_recv(stream_fd *sfd, char *buf, size_t len,
+		const struct sockaddr *sa, const struct re_address *ra,
+		int64_t tv)
+{
 	call_t *ca = sfd->call;
 	if (!ca)
 		goto out;
@@ -3913,7 +3988,10 @@ static void stream_fd_recv(struct obj *obj, char *buf, size_t len, const struct 
 	ZERO(phc);
 	phc.mp.sfd = sfd;
 	phc.mp.tv = tv;
-	sfd->socket.family->sockaddr2endpoint(&phc.mp.fsin, sa);
+	if (sa)
+		sfd->socket.family->sockaddr2endpoint(&phc.mp.fsin, sa);
+	else if (ra)
+		kernel2endpoint(&phc.mp.fsin, ra);
 	phc.s = STR_LEN(buf, len);
 
 	__stream_fd_readable(&phc);
@@ -3926,22 +4004,90 @@ out:
 	bufferpool_unref(buf);
 }
 
+static void stream_fd_recv(struct obj *obj, char *buf, size_t len, const struct sockaddr *sa, int64_t tv) {
+	__stream_fd_recv((stream_fd *) obj, buf, len, sa, NULL, tv);
+}
+
+
+void stream_fd_kernel_input(stream_fd *sfd, char *buf, size_t len,
+		const struct re_address *src, const struct re_address *dst, int64_t tv)
+{
+	// XXX obsolete this by using bufferpool memory directly?
+	char *bbuf = bufferpool_alloc(media_bufferpool, RTP_BUFFER_SIZE);
+
+	memcpy(bbuf + RTP_BUFFER_HEAD_ROOM, buf, len);
+
+	__stream_fd_recv(sfd, bbuf + RTP_BUFFER_HEAD_ROOM, len, NULL, src, tv);
+
+	obj_put(sfd);
+}
+
+
+static void send_q_free_entry(struct uring_req_sendmsg *req) {
+	uring_req_release(&req->req);
+	uring_methods.dup_free(&req->req);
+}
 
 
 static void stream_fd_free(stream_fd *f) {
+	t_queue_clear_full(&f->send_q, send_q_free_entry);
 	release_port(&f->spl);
 	crypto_cleanup(&f->crypto);
 	dtls_connection_cleanup(&f->dtls);
 	mutex_destroy(&f->lock);
 
 	obj_put(f->call);
+
+	bufferpool_unref(f);
 }
+
+
+static void stream_fd_writeable(int fd, void *p) {
+	stream_fd *sfd = p;
+	call_t *ca = sfd->call;
+	if (!ca)
+		return;
+
+	rwlock_lock_r(&ca->master_lock);
+
+	__auto_type ps = sfd->stream;
+
+	if (sfd->socket.fd != fd || !ps) {
+		rwlock_unlock_r(&ca->master_lock);
+		return;
+	}
+
+	log_info_stream_fd(sfd);
+
+	LOCK(&ps->lock);
+
+	while (sfd->send_q.length) {
+		__auto_type req = t_queue_pop_head(&sfd->send_q);
+		ssize_t ret = uring_methods.sendmsg(&sfd->socket, req);
+		if (ret < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				rtpe_poller_blocked(sfd->poller, GINT_TO_POINTER(sfd->socket.fd));
+				t_queue_push_head(&sfd->send_q, req);
+				break;
+			}
+			else {
+				ilog(LOG_WARN | LOG_FLAG_LIMIT, "Error returned from OS while sending media packet: %s",
+						strerror(errno));
+				send_q_free_entry(req);
+			}
+		}
+	}
+
+	rwlock_unlock_r(&ca->master_lock);
+	log_info_pop();
+}
+
 
 stream_fd *stream_fd_new(struct socket_port_link *spl, call_t *call, struct local_intf *lif) {
 	stream_fd *sfd;
 	struct poller_item pi;
 
-	sfd = obj_alloc0(stream_fd, stream_fd_free);
+	sfd = obj_alloc_full(stream_fd, NULL, kernel_shm_alloc0, stream_fd_free);
 	mutex_init(&sfd->lock);
 	sfd->unique_id = t_queue_get_length(&call->stream_fds);
 	sfd->call = obj_get(call);
@@ -3949,12 +4095,13 @@ stream_fd *stream_fd_new(struct socket_port_link *spl, call_t *call, struct loca
 	sfd->spl = *spl;
 	t_queue_push_tail(&call->stream_fds, sfd); /* hand over ref */
 
-	__C_DBG("stream_fd_new localport=%d", sfd->socket.local.port);
+	dbg_int("stream_fd_new localport=%d", sfd->socket.local.port);
 
 	ZERO(pi);
 	pi.fd = sfd->socket.fd;
 	pi.obj = &sfd->obj;
 	pi.readable = stream_fd_readable;
+	pi.writeable = stream_fd_writeable;
 	pi.recv = stream_fd_recv;
 	pi.closed = stream_fd_closed;
 

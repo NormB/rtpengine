@@ -37,11 +37,8 @@ static struct ssrc_entry *create_ssrc_entry_call(void *uptr) {
 	payload_tracker_init(&ent->tracker);
 	while (!ent->ssrc_map_out)
 		ent->ssrc_map_out = ssl_random();
-	ent->seq_out = ssl_random();
 	atomic64_set_na(&ent->last_sample, rtpe_now);
 	ent->stats = bufferpool_alloc0(shm_bufferpool, sizeof(*ent->stats));
-	//ent->seq_out = ssl_random();
-	//ent->ts_out = ssl_random();
 	ent->lost_bits = -1;
 	return &ent->h;
 }
@@ -228,8 +225,10 @@ void *get_ssrc_full(uint32_t ssrc, struct ssrc_hash *ht, bool *created) {
 		LOCK(&ht->lock);
 
 		while (G_UNLIKELY(ht->nq.length > MAX_SSRC_ENTRIES)) {
-			GList *link = g_queue_pop_tail_link(&ht->nq);
-			struct ssrc_entry *old_ent = link->data;
+			struct ssrc_entry *old_ent = ht->nq.tail->data;
+			if (old_ent->obj.ref != 1)
+				break;
+			g_queue_pop_tail_link(&ht->nq);
 			ilog(LOG_DEBUG, "SSRC hash table exceeded size limit (trying to add %s%x%s) - "
 					"deleting SSRC %s%x%s",
 					FMT_M(ssrc), FMT_M(old_ent->ssrc));
@@ -247,6 +246,7 @@ void *get_ssrc_full(uint32_t ssrc, struct ssrc_hash *ht, bool *created) {
 		add_ssrc_entry(ssrc, ent, ht);
 		if (created)
 			*created = true;
+		ht->iters++;
 
 		return ent;
 	}
@@ -487,7 +487,7 @@ void ssrc_receiver_report(struct call_media *m, stream_fd *sfd, const struct ssr
 	mos_calc = mos_calc_legacy;
 #endif
 
-	other_e->packets_lost = rr->packets_lost;
+	other_e->packets_lost_rtcp = rr->packets_lost;
 	mos_calc(ssb);
 	if (ssb->mos) {
 		ilog(LOG_DEBUG, "Calculated MOS from RR for %s%x%s is %.1f", FMT_M(rr->from),

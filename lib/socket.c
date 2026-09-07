@@ -10,7 +10,7 @@
 #include "str.h"
 #include "auxlib.h"
 #include "nft_rtpengine.h"
-#include "log.h"
+#include "loglib.h"
 
 static bool __ip4_addr_parse(sockaddr_t *dst, const char *src);
 static bool __ip6_addr_parse(sockaddr_t *dst, const char *src);
@@ -23,12 +23,6 @@ static bool __ip4_eq(const sockaddr_t *a, const sockaddr_t *b);
 static bool __ip6_eq(const sockaddr_t *a, const sockaddr_t *b);
 static bool __ip4_is_specified(const sockaddr_t *a);
 static bool __ip6_is_specified(const sockaddr_t *a);
-static bool __ip_bind(socket_t *s, unsigned int, const sockaddr_t *);
-static bool __ip_connect(socket_t *s, const endpoint_t *);
-static bool __ip_listen(socket_t *s, int backlog);
-static bool __ip_accept(socket_t *s, socket_t *new_sock);
-static bool __ip_getsockname(socket_t *s);
-static bool __ip_timestamping(socket_t *s);
 static bool __ip4_pktinfo(socket_t *s);
 static bool __ip6_pktinfo(socket_t *s);
 static bool __ip4_sockaddr2endpoint(endpoint_t *, const void *);
@@ -37,15 +31,10 @@ static bool __ip4_endpoint2sockaddr(void *, const endpoint_t *);
 static bool __ip6_endpoint2sockaddr(void *, const endpoint_t *);
 static bool __ip4_addrport2sockaddr(void *, const sockaddr_t *, unsigned int);
 static bool __ip6_addrport2sockaddr(void *, const sockaddr_t *, unsigned int);
-static ssize_t __ip_recvfrom(socket_t *s, void *buf, size_t len, endpoint_t *ep);
-static ssize_t __ip_recvfrom_ts(socket_t *s, void *buf, size_t len, endpoint_t *ep, int64_t *);
 static ssize_t __ip4_recvfrom_to(socket_t *s, void *buf, size_t len, endpoint_t *ep, sockaddr_t *to);
 static ssize_t __ip6_recvfrom_to(socket_t *s, void *buf, size_t len, endpoint_t *ep, sockaddr_t *to);
-static ssize_t __ip_sendmsg(socket_t *s, struct msghdr *mh, const endpoint_t *ep);
-static ssize_t __ip_sendto(socket_t *s, const void *buf, size_t len, const endpoint_t *ep);
 static bool __ip4_tos(socket_t *, unsigned int);
 static bool __ip6_tos(socket_t *, unsigned int);
-static int __ip_error(socket_t *s);
 static void __ip4_pmtu_disc(socket_t *, int);
 static void __ip4_endpoint2kernel(struct re_address *, const endpoint_t *);
 static void __ip6_endpoint2kernel(struct re_address *, const endpoint_t *);
@@ -84,20 +73,9 @@ static struct socket_family __socket_families[__SF_LAST] = {
 		.sockaddr2endpoint	= __ip4_sockaddr2endpoint,
 		.endpoint2sockaddr	= __ip4_endpoint2sockaddr,
 		.addrport2sockaddr	= __ip4_addrport2sockaddr,
-		.bind			= __ip_bind,
-		.connect		= __ip_connect,
-		.listen			= __ip_listen,
-		.accept			= __ip_accept,
-		.getsockname		= __ip_getsockname,
-		.timestamping		= __ip_timestamping,
 		.pktinfo		= __ip4_pktinfo,
-		.recvfrom		= __ip_recvfrom,
-		.recvfrom_ts		= __ip_recvfrom_ts,
 		.recvfrom_to		= __ip4_recvfrom_to,
-		.sendmsg		= __ip_sendmsg,
-		.sendto			= __ip_sendto,
 		.tos			= __ip4_tos,
-		.error			= __ip_error,
 		.pmtu_disc		= __ip4_pmtu_disc,
 		.endpoint2kernel	= __ip4_endpoint2kernel,
 		.kernel2endpoint	= __ip4_kernel2endpoint,
@@ -120,20 +98,9 @@ static struct socket_family __socket_families[__SF_LAST] = {
 		.sockaddr2endpoint	= __ip6_sockaddr2endpoint,
 		.endpoint2sockaddr	= __ip6_endpoint2sockaddr,
 		.addrport2sockaddr	= __ip6_addrport2sockaddr,
-		.bind			= __ip_bind,
-		.connect		= __ip_connect,
-		.listen			= __ip_listen,
-		.accept			= __ip_accept,
-		.getsockname		= __ip_getsockname,
-		.timestamping		= __ip_timestamping,
 		.pktinfo		= __ip6_pktinfo,
-		.recvfrom		= __ip_recvfrom,
-		.recvfrom_ts		= __ip_recvfrom_ts,
 		.recvfrom_to		= __ip6_recvfrom_to,
-		.sendmsg		= __ip_sendmsg,
-		.sendto			= __ip_sendto,
 		.tos			= __ip6_tos,
-		.error			= __ip_error,
 		.endpoint2kernel	= __ip6_endpoint2kernel,
 		.kernel2endpoint	= __ip6_kernel2endpoint,
 		.packet_header		= __ip6_packet_header,
@@ -235,7 +202,7 @@ static bool __ip6_sockaddr2endpoint(endpoint_t *ep, const void *p) {
 	ep->port = ntohs(sin->sin6_port);
 	return true;
 }
-void endpoint_parse_sockaddr_storage(endpoint_t *ep, struct sockaddr_storage *sa) {
+void endpoint_parse_sockaddr_storage(endpoint_t *ep, const struct sockaddr_storage *sa) {
 	if (sa->ss_family == AF_INET)
 		__ip4_sockaddr2endpoint(ep, sa);
 	else if (sa->ss_family == AF_INET6)
@@ -267,35 +234,32 @@ static bool __ip6_addrport2sockaddr(void *p, const sockaddr_t *sa, unsigned int 
 		sin->sin6_addr = sa->ipv6;
 	return true;
 }
-static bool __ip_bind(socket_t *s, unsigned int port, const sockaddr_t *a) {
+bool socket_bind(socket_t *s, unsigned int port, const sockaddr_t *a) {
 	struct sockaddr_storage sin;
 
 	s->family->addrport2sockaddr(&sin, a, port);
 	if (bind(s->fd, (struct sockaddr *) &sin, s->family->sockaddr_size)) {
-		__C_DBG("bind fail, fd=%d, port=%d", s->fd, s->local.port);
+		dbg_int("bind fail, fd=%d, port=%d", s->fd, s->local.port);
 		return false;
 	} else {
-		__C_DBG("bind success, fd=%d, port=%d", s->fd, s->local.port);
+		dbg_int("bind success, fd=%d, port=%d", s->fd, s->local.port);
 	}
 
 	return true;
 }
-static bool __ip_connect(socket_t *s, const endpoint_t *ep) {
+bool socket_connect(socket_t *s, const endpoint_t *ep) {
 	struct sockaddr_storage sin;
 
 	s->family->endpoint2sockaddr(&sin, ep);
 	if (connect(s->fd, (struct sockaddr *) &sin, s->family->sockaddr_size)) {
-		__C_DBG("connect fail, fd=%d, port=%d", s->fd, s->local.port);
+		dbg_int("connect fail, fd=%d, port=%d", s->fd, s->local.port);
 		return false;
 	} else {
-		__C_DBG("connect success, fd=%d, port=%d", s->fd, s->local.port);
+		dbg_int("connect success, fd=%d, port=%d", s->fd, s->local.port);
 	}
 	return true;
 }
-static bool __ip_listen(socket_t *s, int backlog) {
-	return listen(s->fd, backlog) == 0;
-}
-static bool __ip_accept(socket_t *s, socket_t *newsock) {
+bool socket_accept(socket_t *s, socket_t *newsock) {
 	int nfd;
 	struct sockaddr_storage sin;
 	socklen_t sinlen;
@@ -305,7 +269,7 @@ static bool __ip_accept(socket_t *s, socket_t *newsock) {
 	sinlen = sizeof(sin);
 	nfd = accept(s->fd, (struct sockaddr *) &sin, &sinlen);
 	if (nfd == -1) {
-		__C_DBG("accept fail, fd=%d, port=%d", s->fd, s->local.port);
+		dbg_int("accept fail, fd=%d, port=%d", s->fd, s->local.port);
 		return false;
 	}
 
@@ -316,7 +280,7 @@ static bool __ip_accept(socket_t *s, socket_t *newsock) {
 
 	return true;
 }
-static bool __ip_getsockname(socket_t *s) {
+bool socket_getsockname(socket_t *s) {
 	struct sockaddr_storage sin;
 	socklen_t sinlen = sizeof(sin);
 	int ret = getsockname(s->fd, (struct sockaddr *) &sin, &sinlen);
@@ -358,10 +322,10 @@ INLINE ssize_t __ip_recvfrom_options(socket_t *s, void *buf, size_t len, endpoin
 
 	return ret;
 }
-static ssize_t __ip_recvfrom_ts(socket_t *s, void *buf, size_t len, endpoint_t *ep, int64_t *tv) {
+ssize_t socket_recvfrom_ts(socket_t *s, void *buf, size_t len, endpoint_t *ep, int64_t *tv) {
 	return __ip_recvfrom_options(s, buf, len, ep, tv, NULL, NULL);
 }
-static ssize_t __ip_recvfrom(socket_t *s, void *buf, size_t len, endpoint_t *ep) {
+ssize_t socket_recvfrom(socket_t *s, void *buf, size_t len, endpoint_t *ep) {
 	return __ip_recvfrom_options(s, buf, len, ep, NULL, NULL, NULL);
 }
 INLINE bool __ip4_pktinfo_parse(struct cmsghdr *cm, sockaddr_t *to) {
@@ -386,7 +350,7 @@ static ssize_t __ip4_recvfrom_to(socket_t *s, void *buf, size_t len, endpoint_t 
 static ssize_t __ip6_recvfrom_to(socket_t *s, void *buf, size_t len, endpoint_t *ep, sockaddr_t *to) {
 	return __ip_recvfrom_options(s, buf, len, ep, NULL, to, __ip6_pktinfo_parse);
 }
-static ssize_t __ip_sendmsg(socket_t *s, struct msghdr *mh, const endpoint_t *ep) {
+ssize_t socket_sendmsg(socket_t *s, struct msghdr *mh, const endpoint_t *ep) {
 	struct sockaddr_storage sin;
 
 	if (ep) {
@@ -397,7 +361,7 @@ static ssize_t __ip_sendmsg(socket_t *s, struct msghdr *mh, const endpoint_t *ep
 
 	return sendmsg(s->fd, mh, 0);
 }
-static ssize_t __ip_sendto(socket_t *s, const void *buf, size_t len, const endpoint_t *ep) {
+ssize_t socket_sendto(socket_t *s, const void *buf, size_t len, const endpoint_t *ep) {
 	struct sockaddr_storage sin;
 
 	if (!ep->address.family)
@@ -417,7 +381,7 @@ static bool __ip6_tos(socket_t *s, unsigned int tos) {
 		ilog(LOG_ERR, "Failed to set TOS on IPv6 socket: %s", strerror(errno));
 	return true;
 }
-static int __ip_error(socket_t *s) {
+int socket_error(socket_t *s) {
 	int optval;
 	socklen_t optlen = sizeof(optval);
 	if (getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &optval, &optlen))
@@ -428,7 +392,7 @@ static void __ip4_pmtu_disc(socket_t *s, int opt) {
 	if (setsockopt(s->fd, IPPROTO_IP, IP_MTU_DISCOVER, &opt, sizeof(opt)))
 		ilog(LOG_ERR, "Failed to set PMTU discovery option on IPv4 socket: %s", strerror(errno));
 }
-static bool __ip_timestamping(socket_t *s) {
+bool socket_timestamping(socket_t *s) {
 	int one = 1;
 	if (setsockopt(s->fd, SOL_SOCKET, SO_TIMESTAMP, &one, sizeof(one)))
 		return false;
@@ -673,7 +637,7 @@ bool sockaddr_getaddrinfo_alt(sockaddr_t *a, sockaddr_t *a2, const char *s) {
 	hints.ai_socktype = SOCK_DGRAM;
 
 	if ((status = getaddrinfo(s, NULL, &hints, &res)) != 0) {
-		__C_DBG("getaddrinfo failed for %s, status is \"%s\"\n", s, gai_strerror(status));
+		dbg_int("getaddrinfo failed for %s, status is \"%s\"\n", s, gai_strerror(status));
 		return false;
 	}
 
@@ -744,10 +708,10 @@ static bool __socket(socket_t *r, int type, sockfamily_t *fam) {
 	r->family = fam;
 	r->fd = socket(fam->af, type, 0);
 	if (r->fd == -1) {
-		__C_DBG("socket() syscall fail, fd=%d", r->fd);
+		dbg_int("socket() syscall fail, fd=%d", r->fd);
 		return false;
 	} else {
-		__C_DBG("socket() syscall success, fd=%d", r->fd);
+		dbg_int("socket() syscall success, fd=%d", r->fd);
 	}
 
 	return true;
@@ -769,7 +733,7 @@ bool open_socket(socket_t *r, int type, unsigned int port, const sockaddr_t *sa)
 	fam = sa->family;
 
 	if (!__socket(r, type, fam)) {
-		__C_DBG("open socket fail, fd=%d", r->fd);
+		dbg_int("open socket fail, fd=%d", r->fd);
 		return false;
 	}
 
@@ -779,19 +743,19 @@ bool open_socket(socket_t *r, int type, unsigned int port, const sockaddr_t *sa)
 		ipv6only(r->fd, 1);
 
 	if (port > 0xffff) {
-		__C_DBG("open socket fail, port=%d > 0xfffffd", port);
+		dbg_int("open socket fail, port=%d > 0xfffffd", port);
 		goto fail;
 	}
 
-	if (!fam->bind(r, port, sa)) {
-		__C_DBG("open socket fail, fd=%d, port=%d", r->fd, port);
+	if (!socket_bind(r, port, sa)) {
+		dbg_int("open socket fail, fd=%d, port=%d", r->fd, port);
 		goto fail;
 	}
 
 	r->local.port = port;
 	r->local.address = *sa;
 
-	__C_DBG("open socket success, fd=%d, port=%d", r->fd, port);
+	dbg_int("open socket success, fd=%d, port=%d", r->fd, port);
 
 	return true;
 
@@ -806,7 +770,7 @@ bool open_v46_socket(socket_t *r, int type) {
 		if (errno == EAFNOSUPPORT)
 			ret = __socket(r, type, &__socket_families[SF_IP4]);
 		if (!ret) {
-			__C_DBG("open socket fail");
+			dbg_int("open socket fail");
 			return false;
 		}
 	}
@@ -833,7 +797,7 @@ bool connect_socket(socket_t *r, int type, const endpoint_t *ep) {
 
 	if (!__socket(r, type, fam))
 		return false;
-	if (!fam->connect(r, ep))
+	if (!socket_connect(r, ep))
 		goto fail;
 
 	r->remote = *ep;
@@ -848,7 +812,7 @@ fail:
 int connect_socket_retry(socket_t *r) {
 	int ret = 0;
 
-	if (!r->family->connect(r, &r->remote)) {
+	if (!socket_connect(r, &r->remote)) {
 		if (errno != EINPROGRESS && errno != EALREADY && errno != EISCONN)
 			goto fail;
 		if (errno != EISCONN)
@@ -880,6 +844,7 @@ bool reset_socket(socket_t *r) {
 		return false;
 
 	r->fd = -1;
+	r->family = NULL;
 	ZERO(r->local);
 	ZERO(r->remote);
 
@@ -887,20 +852,20 @@ bool reset_socket(socket_t *r) {
 }
 bool close_socket(socket_t *r) {
 	if (!r) {
-		__C_DBG("close() syscall not called, no socket");
+		dbg_int("close() syscall not called, no socket");
 		return false;
 	}
 	if (r->fd == -1) {
-		__C_DBG("close() syscall not called, fd=%d", r->fd);
+		dbg_int("close() syscall not called, fd=%d", r->fd);
 		return false;
 	}
 
 	if (close(r->fd) != 0) {
-		__C_DBG("close() syscall fail, fd=%d", r->fd);
+		dbg_int("close() syscall fail, fd=%d", r->fd);
 		return false;
 	}
 
-	__C_DBG("close() syscall success, fd=%d", r->fd);
+	dbg_int("close() syscall success, fd=%d", r->fd);
 
 	reset_socket(r);
 
