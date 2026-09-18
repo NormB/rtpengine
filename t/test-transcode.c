@@ -65,7 +65,7 @@ static void __cleanup(void) {
 	t_queue_clear_full(&flags.codec_accept, str_free);
 	t_queue_clear_full(&flags.codec_consume, str_free);
 	t_queue_clear_full(&flags.codec_mask, str_free);
-	t_queue_clear(&call.monologues);
+	i_queue_init(&call.monologues);
 
 	codec_store_cleanup(&rtp_types_sp.codecs);
 	memset(&flags, 0, sizeof(flags));
@@ -99,14 +99,14 @@ static void __start(const char *file, int line) {
 	obj_hold(&call);
 	call.tags = str_ml_ht_new();
 	call.callid = STR("test-call");
-	bencode_buffer_init(&call.buffer);
+	arena_init(&call.buffer, g_malloc, g_free);
 	call_memory_arena_set(&call);
 	ml_A = __monologue_create(&call, &call.callid);
 	ml_B = __monologue_create(&call, &call.callid);
 	media_A = call_media_new(&call); // originator
 	media_B = call_media_new(&call); // output destination
-	t_queue_push_tail(&media_A->streams, ps_new(media_A));
-	t_queue_push_tail(&media_B->streams, ps_new(media_B));
+	i_queue_push_tail(&media_A->streams, ps_new(media_A));
+	i_queue_push_tail(&media_B->streams, ps_new(media_B));
 	ml_A->tag = STR("tag_A");
 	ml_A->label = STR("label_A");
 	media_A->monologue = ml_A;
@@ -167,7 +167,7 @@ static void __sdp_pt_fmt(int num, str codec, int clockrate, int channels, str fu
 		.channels = channels,
 		.format_parameters = *fmtdup,
 		.codec_opts = STR_NULL,
-		.rtcp_fb = G_QUEUE_INIT,
+		.rtcp_fb = TYPED_GQUEUE_INIT,
 		.ptime = 0,
 		.bitrate = 0,
 		.codec_def = NULL,
@@ -272,9 +272,9 @@ static void __packet_seq_ts(const char *file, int line, struct call_media *media
 		.media_out = other_media,
 		.ssrc_in = get_ssrc(ssrc, &media->ssrc_hash_in),
 		.sfd = &sfd,
-		.sink = { .sink = other_media->streams.head->data },
+		.sink = { .sink = other_media->streams.head },
 	};
-	determine_sink_handler(media->streams.head->data, &mp.sink);
+	determine_sink_handler(media->streams.head, &mp.sink);
 	// from __stream_ssrc()
 	if (!MEDIA_ISSET(media, TRANSCODING))
 		mp.ssrc_in->ssrc_map_out = ntohl(ssrc);
@@ -384,18 +384,16 @@ static void __packet_seq_ts(const char *file, int line, struct call_media *media
 static void end(void) {
 	g_hash_table_destroy(rtp_ts_ht);
 	g_hash_table_destroy(rtp_seq_ht);
-	t_queue_clear(&media_A->streams);
-	t_queue_clear(&media_B->streams);
 	call_media_free(media_A);
 	call_media_free(media_B);
 	t_hash_table_destroy(call.tags);
-	t_queue_clear(&call.medias);
+	i_queue_init(&call.medias);
 	if (ml_A)
 		__monologue_free(ml_A);
 	if (ml_B)
 		__monologue_free(ml_B);
 	__cleanup();
-	bencode_buffer_free(&call.buffer);
+	arena_free(&call.buffer);
 	call_memory_arena_release();
 	printf("\n");
 }

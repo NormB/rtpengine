@@ -442,7 +442,7 @@ static intf_spec_ht __intf_spec_addr_type_hash;
 static local_intf_ht __local_intf_addr_type_hash;
 static logical_intf_q __preferred_lists_for_family[__SF_LAST];
 
-local_intf_q all_local_interfaces = TYPED_GQUEUE_INIT;
+all_local_intf_q all_local_interfaces = IQUEUE_INIT;
 
 TYPED_GHASHTABLE(local_sockets_ht, endpoint_t, stream_fd, endpoint_hash, endpoint_eq, NULL, stream_fd_put)
 static rwlock_t local_media_socket_endpoints_lock = RWLOCK_STATIC_INIT;
@@ -989,7 +989,7 @@ static void __interface_append(struct intf_config *ifa, sockfamily_t *fam, bool 
 	ifc->logical = lif;
 	ifc->stats = bufferpool_alloc0(static_bufferpool, sizeof(*ifc->stats));
 
-	t_queue_push_tail(&all_local_interfaces, ifc);
+	i_queue_push_tail(&all_local_interfaces, ifc);
 
 	__insert_local_intf_addr_type(&spec->local_address, ifc);
 	__insert_local_intf_addr_type(&ifc->advertised_address, ifc);
@@ -1031,8 +1031,7 @@ void interfaces_init(intf_config_q *interfaces) {
 }
 
 void interfaces_exclude_port(endpoint_t *e) {
-	for (__auto_type l = all_local_interfaces.head; l; l = l->next) {
-		__auto_type ifa = l->data;
+	IQUEUE_FOREACH(&all_local_interfaces, ifa) {
 		__auto_type spec = ifa->spec;
 		if (e->address.family != spec->local_address.addr.family)
 			continue;
@@ -1859,7 +1858,8 @@ static const char *kernelize_one(kernelize_state *s,
 
 	}
 
-	if (MEDIA_ISSET(media, ECHO) || sink_handler->attrs.transcoding)
+	if (MEDIA_ISSET(media, ECHO) || sink_handler->attrs.transcoding
+			|| sink->media->fixed_egress_ssrc)
 		redi->output.ssrc_subst = 1;
 
 	__re_address_translate_ep(&redi->output.dst_addr, &sink->endpoint);
@@ -2545,7 +2545,10 @@ static void __determine_rtpext_handler(struct call_media *in, struct call_media 
 	if (!sh || !out)
 		return;
 
-	if (in->extmap.length || out->extmap.length)
+	/* With `force strip extmap` set on the call, use the extmap printer even
+	 * if no header extensions were negotiated, so that unannounced header
+	 * extensions are removed from forwarded RTP. */
+	if (in->extmap.length || out->extmap.length || CALL_ISSET(out->call, FORCE_STRIP_EXTMAP))
 		sh->rtpext = &rtpext_printer_extmap;
 	else
 		sh->rtpext = &rtpext_printer_copy;
@@ -2815,7 +2818,7 @@ static void media_packet_reset_media(struct packet_handler_ctx *phc, struct call
 
 	// reset media, stream, sinks, in_srtp
 	phc->mp.media = media;
-	phc->mp.stream = media->streams.head->data;
+	phc->mp.stream = media->streams.head;
 	phc->in_srtp = phc->mp.stream;
 	phc->sinks = &phc->mp.stream->rtp_sinks;
 }
@@ -3046,15 +3049,39 @@ static void media_packet_rtp_out(struct packet_handler_ctx *phc, struct sink_han
 
 	const char *unkern = NULL;
 
+	uint32_t fixed_ssrc = phc->mp.media_out->fixed_egress_ssrc;
+
+	/* A fixed egress SSRC is just a mapping from the ingress SSRC, so record it
+	 * where every consumer already looks for one. */
+	if (fixed_ssrc && phc->mp.ssrc_in)
+		phc->mp.ssrc_in->ssrc_map_out = fixed_ssrc;
+
 	if (G_LIKELY(!phc->rtcp && phc->mp.rtp)) {
 		unkern = __stream_ssrc_out(phc->out_srtp, phc->mp.rtp->ssrc, phc->mp.ssrc_in,
 				&phc->mp.ssrc_out, &phc->mp.media_out->ssrc_hash_out,
-				sh->attrs.transcoding ? true : false);
+				sh->attrs.transcoding || fixed_ssrc);
+
+		/* a fixed egress SSRC outlives the ingress SSRC, so carry the
+		 * sequence numbering across a change of source */
+		if (fixed_ssrc && phc->mp.ssrc_out) {
+			struct ssrc_entry_call *so = phc->mp.ssrc_out;
+			uint32_t in_ssrc = ntohl(phc->mp.rtp->ssrc);
+			uint16_t seq = ntohs(phc->mp.rtp->seq_num);
+			if (so->fixed_in_ssrc_set && so->fixed_in_ssrc != in_ssrc) {
+				/* the egress sequence counter lives in memory shared with
+				 * the kernel module, so it stays current even while the
+				 * stream is offloaded and userspace sees no packets */
+				uint16_t last = atomic_get_na(&so->stats->ext_seq);
+				so->seq_diff = last + 1 - seq;
+			}
+			so->fixed_in_ssrc = in_ssrc;
+			so->fixed_in_ssrc_set = true;
+		}
 	}
 	else if (phc->rtcp && phc->mp.rtcp) {
 		unkern = __stream_ssrc_out(phc->out_srtp, phc->mp.rtcp->ssrc, phc->mp.ssrc_in,
 				&phc->mp.ssrc_out, &phc->mp.media_out->ssrc_hash_out,
-				sh->attrs.transcoding ? true : false);
+				sh->attrs.transcoding || fixed_ssrc);
 	}
 
 	if (unkern)
@@ -3812,10 +3839,8 @@ out:
 	if (phc->unkernelize_subscriptions) {
 		IQUEUE_FOREACH(&phc->mp.media->media_subscriptions, ms) {
 			__auto_type sub_media = ms->media;
-			for (__auto_type m = sub_media->streams.head; m; m = m->next) {
-				struct packet_stream *sub_ps = m->data;
+			IQUEUE_FOREACH(&sub_media->streams, sub_ps)
 				unkernelize(sub_ps, "subscriptions modified");
-			}
 		}
 	}
 
@@ -4178,11 +4203,6 @@ void play_buffered(struct jb_packet *cp) {
 void interfaces_free(void) {
 	struct local_intf *ifc;
 
-	while ((ifc = t_queue_pop_head(&all_local_interfaces))) {
-		free(ifc->ice_foundation.s);
-		bufferpool_unref(ifc->stats);
-	}
-
 	t_hash_table_destroy(__logical_intf_name_family_hash);
 
 	__auto_type l_iter = t_hash_table_iter(__local_intf_addr_type_hash);
@@ -4223,6 +4243,12 @@ void interfaces_free(void) {
 			t_queue_clear(&lif->list);
 			g_free(lif);
 		}
+	}
+
+	while ((ifc = i_queue_pop_head(&all_local_interfaces))) {
+		free(ifc->ice_foundation.s);
+		bufferpool_unref(ifc->stats);
+		g_free(ifc);
 	}
 
 	t_hash_table_destroy_ptr(&local_media_socket_endpoints);
@@ -4295,8 +4321,7 @@ const str *resolve_interface_from_peer_ip(const str *peer_ip) {
 	close_socket(&sock);
 
 	/* find first matching interface (loop preserves config ordering) */
-	for (__auto_type l = all_local_interfaces.head; l; l = l->next) {
-		struct local_intf *lif = l->data;
+	IQUEUE_FOREACH(&all_local_interfaces, lif) {
 		if (sockaddr_eq(&local_addr, &lif->spec->local_address.addr))
 			return &lif->logical->name;
 	}

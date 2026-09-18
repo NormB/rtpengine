@@ -1594,6 +1594,8 @@ static int fill_endpoint(struct endpoint *ep, const struct sdp_media *media, sdp
 }
 
 
+TYPED_GHASHTABLE(rtcp_fb_ht, void, str_q, g_direct_hash, g_direct_equal, NULL, str_q_free);
+
 
 static bool __rtp_payload_types(struct stream_params *sp, struct sdp_media *media)
 {
@@ -1622,7 +1624,7 @@ static bool __rtp_payload_types(struct stream_params *sp, struct sdp_media *medi
 				&attr->fmtp.format_parms_str);
 	}
 	// do the same for a=rtcp-fb
-	g_autoptr(GHashTable) ht_rtcp_fb = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, (GDestroyNotify) g_queue_free);
+	g_auto(rtcp_fb_ht) ht_rtcp_fb = rtcp_fb_ht_new();
 	q = attr_list_get_by_id(&media->attributes, ATTR_RTCP_FB);
 	for (__auto_type ql = q ? q->head : NULL; ql; ql = ql->next) {
 		attr = ql->data;
@@ -1631,8 +1633,12 @@ static bool __rtp_payload_types(struct stream_params *sp, struct sdp_media *medi
 			struct sdp_attr *ac = sdp_attr_dup(attr);
 			t_queue_push_tail(&sp->generic_attributes, ac);
 		}
-		GQueue *rq = g_hash_table_lookup_queue_new(ht_rtcp_fb, GINT_TO_POINTER(attr->rtcp_fb.payload_type), NULL);
-		g_queue_push_tail(rq, &attr->rtcp_fb.value);
+		str_q *rq = t_hash_table_lookup(ht_rtcp_fb, GINT_TO_POINTER(attr->rtcp_fb.payload_type));
+		if (!rq) {
+			rq = str_q_new();
+			t_hash_table_insert(ht_rtcp_fb, GINT_TO_POINTER(attr->rtcp_fb.payload_type), rq);
+		}
+		t_queue_push_tail(rq, &attr->rtcp_fb.value);
 	}
 
 	/* then go through the format list and associate */
@@ -1653,7 +1659,7 @@ static bool __rtp_payload_types(struct stream_params *sp, struct sdp_media *medi
 		ptrfc = rtp_get_rfc_payload_type(i);
 		ptl = g_hash_table_lookup(ht_rtpmap, GINT_TO_POINTER(i));
 
-		pt = memory_arena_alloc0(rtp_payload_type);
+		pt = memory_arena_alloc0_lw(rtp_payload_type);
 		if (ptl)
 			*pt = *ptl;
 		else if (ptrfc)
@@ -1666,12 +1672,12 @@ static bool __rtp_payload_types(struct stream_params *sp, struct sdp_media *medi
 			pt->format_parameters = *s;
 		else
 			pt->format_parameters = STR_EMPTY;
-		GQueue *rq = g_hash_table_lookup(ht_rtcp_fb, GINT_TO_POINTER(i));
+		str_q *rq = t_hash_table_lookup(ht_rtcp_fb, GINT_TO_POINTER(i));
 		if (rq) {
 			// steal the list contents and free the list
 			pt->rtcp_fb = *rq;
-			g_queue_init(rq);
-			g_hash_table_remove(ht_rtcp_fb, GINT_TO_POINTER(i)); // frees `rq`
+			t_queue_init(rq);
+			t_hash_table_remove(ht_rtcp_fb, GINT_TO_POINTER(i)); // frees `rq`
 		}
 
 		// fill in ptime
@@ -1892,12 +1898,12 @@ static bool legacy_osrtp_accept(struct stream_params *sp, sdp_streams_q *streams
 }
 
 static struct sdp_attr *sdp_attr_dup(const struct sdp_attribute *c) {
-	struct sdp_attr *ac = g_new0(__typeof(*ac), 1);
+	struct sdp_attr *ac = memory_arena_alloc0_lw(__typeof(*ac));
 
-	ac->strs.name = call_str_cpy(&c->strs.name);
-	ac->strs.value = call_str_cpy(&c->strs.value);
-	ac->strs.line_value = call_str_cpy(&c->strs.line_value);
-	ac->strs.key = call_str_cpy(&c->strs.key);
+	ac->strs.name = memory_arena_str_cpy_lw(&c->strs.name);
+	ac->strs.value = memory_arena_str_cpy_lw(&c->strs.value);
+	ac->strs.line_value = memory_arena_str_cpy_lw(&c->strs.line_value);
+	ac->strs.key = memory_arena_str_cpy_lw(&c->strs.key);
 	ac->other = c->other;
 	ac->attr = c->attr;
 
@@ -1905,23 +1911,32 @@ static struct sdp_attr *sdp_attr_dup(const struct sdp_attribute *c) {
 }
 
 void sdp_attr_free(struct sdp_attr *c) {
-	g_free(c);
+	memory_arena_free_lw(c->strs.name.s);
+	memory_arena_free_lw(c->strs.value.s);
+	memory_arena_free_lw(c->strs.line_value.s);
+	memory_arena_free_lw(c->strs.key.s);
+	memory_arena_free_lw(c);
 }
 
-sdp_origin sdp_orig_dup(const sdp_origin *orig) {
-	sdp_origin copy = {};
-	copy.username = call_str_cpy(&orig->username);
-	copy.session_id = call_str_cpy(&orig->session_id);
-	copy.version_num = orig->version_num;
-	copy.version_output_pos = orig->version_output_pos;
-	copy.parsed = orig->parsed;
+void sdp_orig_dup(sdp_origin *copy, const sdp_origin *orig) {
+	memory_arena_str_cpy_free(&copy->username, &orig->username);
+	memory_arena_str_cpy_free(&copy->session_id, &orig->session_id);
+	copy->version_num = orig->version_num;
+	copy->version_output_pos = orig->version_output_pos;
+	copy->parsed = orig->parsed;
 	/* struct network_address */
-	copy.address.network_type = call_str_cpy(&orig->address.network_type);
-	copy.address.address_type = call_str_cpy(&orig->address.address_type);
-	copy.address.address = call_str_cpy(&orig->address.address);
-	copy.address.parsed = orig->address.parsed;
+	memory_arena_str_cpy_free(&copy->address.network_type, &orig->address.network_type);
+	memory_arena_str_cpy_free(&copy->address.address_type, &orig->address.address_type);
+	memory_arena_str_cpy_free(&copy->address.address, &orig->address.address);
+	copy->address.parsed = orig->address.parsed;
+}
 
-	return copy;
+void sdp_orig_free(sdp_origin *orig) {
+	memory_arena_free_lw(orig->username.s);
+	memory_arena_free_lw(orig->session_id.s);
+	memory_arena_free_lw(orig->address.network_type.s);
+	memory_arena_free_lw(orig->address.address_type.s);
+	memory_arena_free_lw(orig->address.address.s);
 }
 
 static void sdp_attr_append1(sdp_attr_q *dst, const struct sdp_attribute *attr) {
@@ -2292,7 +2307,7 @@ static void insert_codec_parameters(GString *s, struct call_media *cm,
 					&pt->format_parameters, flags, cm->type_id);
 
 		/* rtcp-fb */
-		for (GList *k = pt->rtcp_fb.head; k; k = k->next) {
+		for (__auto_type k = pt->rtcp_fb.head; k; k = k->next) {
 			str *fb = k->data;
 			append_int_tagged_attr_to_gstring(s, "rtcp-fb", pt->payload_type, fb,
 					flags, cm->type_id);
@@ -2826,19 +2841,13 @@ static void append_int_tagged_str_attr_to_gstring(GString *s, const str *name, u
 	__attr_end(&state);
 }
 
-static struct packet_stream *print_rtcp(GString *s, struct call_media *media, packet_stream_list *rtp_ps_link,
+static struct packet_stream *print_rtcp(GString *s, struct call_media *media, struct packet_stream *ps,
 		const sdp_ng_flags *flags)
 {
-	struct packet_stream *ps = rtp_ps_link->data;
 	struct packet_stream *ps_rtcp = NULL;
 
-	if (ps->rtcp_sibling) {
+	if (ps->rtcp_sibling)
 		ps_rtcp = ps->rtcp_sibling;
-		__auto_type rtcp_ps_link = rtp_ps_link->next;
-		if (!rtcp_ps_link)
-			return NULL;
-		assert(rtcp_ps_link->data == ps_rtcp);
-	}
 
 	if (proto_is_rtp(media->protocol)) {
 		if (MEDIA_ISSET(media, RTCP_MUX) &&
@@ -2880,12 +2889,12 @@ static void sdp_out_print_information(GString *out, const str *s) {
 }
 
 /* TODO: rework an appending of parameters in terms of sdp attribute manipulations */
-__attribute__((nonnull(1, 2, 3, 6, 7, 8)))
+__attribute__((nonnull(1, 2, 3, 6, 7)))
 static void print_sdp_media_section(GString *s, struct call_media *media,
 		const endpoint_t *address, struct call_media *copy_media,
 		struct call_media *source_media,
 		struct packet_stream *rtp_ps,
-		packet_stream_list *rtp_ps_link, sdp_ng_flags *flags)
+		sdp_ng_flags *flags)
 {
 	struct packet_stream *ps_rtcp = NULL;
 	bool inactive_media = (!address->port || !rtp_ps->selected_sfd); /* audio is accepted? */
@@ -2949,7 +2958,7 @@ static void print_sdp_media_section(GString *s, struct call_media *media,
 		}
 	}
 
-	ps_rtcp = print_rtcp(s, media, rtp_ps_link, flags);
+	ps_rtcp = print_rtcp(s, media, rtp_ps, flags);
 
 	if (proto_is_rtp(media->protocol)) {
 		insert_crypto(s, media, flags);
@@ -3058,7 +3067,7 @@ static void sdp_out_add_origin(GString *out, struct call_monologue *monologue,
 		orig_address = STR(sockaddr_print_buf(&first_ps->selected_sfd->local_intf->advertised_address.addr));
 	}
 
-	monologue->sdp_orig_out = sdp_orig_dup(&(sdp_origin) {
+	sdp_orig_dup(&monologue->sdp_orig_out, &(sdp_origin) {
 			.username = username,
 			.session_id = session_id,
 			.version_num = session_version,
@@ -3336,11 +3345,11 @@ static bool sdp_out_add_media(GString *out, struct call_media *media,
 	return true;
 }
 
-__attribute__((nonnull(1, 2, 4, 6, 7, 8)))
+__attribute__((nonnull(1, 2, 4, 6, 7)))
 static void sdp_out_handle_osrtp1(GString *out, struct call_media *media,
 		struct call_media *source_media,
 		const endpoint_t *address, const struct transport_protocol *prtp,
-		struct packet_stream *rtp_ps, packet_stream_list *rtp_ps_link,
+		struct packet_stream *rtp_ps,
 		sdp_ng_flags *flags)
 {
 	if (!prtp)
@@ -3355,7 +3364,7 @@ static void sdp_out_handle_osrtp1(GString *out, struct call_media *media,
 
 		sdp_out_add_osrtp_media(out, media, prtp, address);
 		/* print media level attributes */
-		print_sdp_media_section(out, media, address, NULL, source_media, rtp_ps, rtp_ps_link, flags);
+		print_sdp_media_section(out, media, address, NULL, source_media, rtp_ps, flags);
 
 		media->protocol = proto;
 	}
@@ -3417,7 +3426,7 @@ static struct call_media *sdp_out_set_source_media_address(struct call_media *me
 		/* cases with message, force relay and pass through */
 		if (media->type_id == MT_MESSAGE || flags->ice_option == ICE_FORCE_RELAY || MEDIA_ISSET(media, PASSTHRU)) {
 			if (source_media->streams.head) {
-				__auto_type sub_ps = source_media->streams.head->data;
+				__auto_type sub_ps = source_media->streams.head;
 				*sdp_address = sub_ps->advertised_endpoint;
 			}
 			return source_media;
@@ -3470,7 +3479,7 @@ bool sdp_create(str *out, struct call_monologue *monologue, sdp_ng_flags *flags)
 			continue;
 		if (!media->streams.head)
 			continue;
-		first_ps = media->streams.head->data;
+		first_ps = media->streams.head;
 		if (!first_ps->selected_sfd)
 			continue;
 		break;
@@ -3528,9 +3537,7 @@ bool sdp_create(str *out, struct call_monologue *monologue, sdp_ng_flags *flags)
 		if (!media->streams.length)
 			goto err;
 
-		__auto_type rtp_ps_link = media->streams.head;
-		struct packet_stream *rtp_ps = rtp_ps_link->data;
-
+		__auto_type rtp_ps = media->streams.head;
 		__auto_type media_ms = call_media_get_top_ms(media);
 		__auto_type source_media = media_ms ? media_ms->media : NULL;
 
@@ -3549,7 +3556,7 @@ bool sdp_create(str *out, struct call_monologue *monologue, sdp_ng_flags *flags)
 			prtp = &transport_protocols[media->protocol->rtp_proto];
 
 		/* handle first OSRTP part */
-		sdp_out_handle_osrtp1(s, media, source_media, &sdp_address, prtp, rtp_ps, rtp_ps_link, flags);
+		sdp_out_handle_osrtp1(s, media, source_media, &sdp_address, prtp, rtp_ps, flags);
 
 		/* set: media type, port, protocol (e.g. RTP/SAVP) */
 		err = "Unknown media protocol";
@@ -3560,7 +3567,7 @@ bool sdp_create(str *out, struct call_monologue *monologue, sdp_ng_flags *flags)
 
 		/* print media level attributes */
 		print_sdp_media_section(s, media, &sdp_address, copy_media, source_media,
-				rtp_ps, rtp_ps_link, flags);
+				rtp_ps, flags);
 
 		/* handle second OSRTP part */
 		sdp_out_handle_osrtp2(s, media, prtp);

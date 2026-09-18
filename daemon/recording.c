@@ -278,7 +278,7 @@ static void update_call_field(call_t *call, str *dst_field, const str *src_field
 		return;
 
 	if (src_field && src_field->len && str_cmp_str(src_field, dst_field))
-		*dst_field = call_str_cpy(src_field);
+		memory_arena_str_cpy_free(dst_field, src_field);
 
 	if (call->recording && dst_field->len) {
 		va_list ap;
@@ -333,11 +333,9 @@ static void update_flags_proc(call_t *call, bool streams) {
 	update_metadata_call(call, NULL);
 	if (!streams)
 		return;
-	for (__auto_type l = call->streams.head; l; l = l->next) {
-		struct packet_stream *ps = l->data;
+	IQUEUE_FOREACH(&call->streams, ps)
 		append_meta_chunk_null(call->recording, "STREAM %u FORWARDING %u",
 				ps->unique_id, ML_ISSET(ps->media->monologue, REC_FORWARDING) ? 1 : 0);
-	}
 }
 static void recording_update_flags(call_t *call, bool streams) {
 	_rm(update_flags, call, streams);
@@ -376,8 +374,8 @@ void recording_start_daemon(call_t *call) {
 		char rand_str[rand_bytes * 2 + 1];
 		rand_hex_str(rand_str, rand_bytes);
 		g_autoptr(char) meta_prefix = g_strdup_printf("%s-%s", escaped_callid, rand_str);
-		call->recording_meta_prefix = call_str_cpy(STR_PTR(meta_prefix));
-		call->recording_random_tag = call_str_cpy(&STR_CONST(rand_str));
+		call->recording_meta_prefix = memory_arena_str_cpy_lw(STR_PTR(meta_prefix));
+		call->recording_random_tag = memory_arena_str_cpy_lw(&STR_CONST(rand_str));
 	}
 
 	_rm(init_struct, call);
@@ -391,16 +389,11 @@ void recording_start_daemon(call_t *call) {
 	// through all related objects and initialize the recording stuff. if this
 	// function is called right at the start of the call, all of the following
 	// is essentially a no-op
-	for (__auto_type l = call->monologues.head; l; l = l->next) {
-		struct call_monologue *ml = l->data;
+	IQUEUE_FOREACH(&call->monologues, ml)
 		rec_setup_monologue(ml);
-	}
-	for (__auto_type l = call->medias.head; l; l = l->next) {
-		struct call_media *m = l->data;
+	IQUEUE_FOREACH(&call->medias, m)
 		recording_setup_media(m);
-	}
-	for (__auto_type l = call->streams.head; l; l = l->next) {
-		struct packet_stream *ps = l->data;
+	IQUEUE_FOREACH(&call->streams, ps) {
 		recording_setup_stream(ps);
 		__unkernelize(ps, "recording start");
 		__reset_sink_handlers(ps);
@@ -439,8 +432,7 @@ void recording_stop_daemon(call_t *call) {
 		return;
 	}
 
-	for (__auto_type l = call->monologues.head; l; l = l->next) {
-		struct call_monologue *ml = l->data;
+	IQUEUE_FOREACH(&call->monologues, ml) {
 		if (ML_ISSET(ml, REC_FORWARDING)) {
 			recording_update_flags(call, true);
 			return;
@@ -615,7 +607,7 @@ static void rec_pcap_meta_finish_file(call_t *call) {
 	char timebuffer[20];
 	struct tm timeinfo;
 	int64_t terminate;
-	terminate = (((struct call_monologue *)call->monologues.head->data)->terminated);
+	terminate = call->monologues.head->terminated;
 	fprintf(recording->pcap.meta_fp, "\nTimestamp terminated ms(first monologue): %.3lf", terminate / 1000.);
 	if (localtime_r(&start, &timeinfo) == NULL) {
 		ilog(LOG_ERROR, "Cannot get start local time, while cleaning up recording meta file: %s", strerror(errno));
@@ -866,12 +858,22 @@ void recording_finish(call_t *call, bool discard) {
 
 	// clear the meta prefix to ensure that pcaps for subsequent
 	// start recordings dont overwrite previous ones
+	memory_arena_free_lw(call->recording_meta_prefix.s);
 	call->recording_meta_prefix = STR_NULL;
+	memory_arena_free_lw(call->recording_random_tag.s);
+	call->recording_random_tag = STR_NULL;
+
 	// also clear per-recording path overrides so they are not
 	// inadvertently reused if the next start recording omits them
+	memory_arena_free_lw(call->recording_file.s);
 	call->recording_file = STR_NULL;
+	memory_arena_free_lw(call->recording_path.s);
 	call->recording_path = STR_NULL;
+	memory_arena_free_lw(call->recording_pattern.s);
 	call->recording_pattern = STR_NULL;
+
+	memory_arena_free_lw(call->metadata.s);
+	call->metadata = STR_NULL;
 }
 
 
@@ -1015,10 +1017,8 @@ static void finish_proc(call_t *call, bool discard) {
 
 	recording->proc.call_idx = UNINIT_IDX;
 
-	for (__auto_type l = call->streams.head; l; l = l->next) {
-		struct packet_stream *ps = l->data;
+	IQUEUE_FOREACH(&call->streams, ps)
 		ps->recording.proc.stream_idx = UNINIT_IDX;
-	}
 
 	if (!recording->proc.meta_filepath)
 		return;

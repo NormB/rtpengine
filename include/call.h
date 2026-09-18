@@ -255,6 +255,7 @@ enum {
 #define CALL_FLAG_BLOCK_MEDIA			(1LL << 28)
 #define CALL_FLAG_SILENCE_MEDIA			(1LL << 29)
 #define CALL_FLAG_NO_REC_DB			(1LL << 30)
+#define CALL_FLAG_FORCE_STRIP_EXTMAP		(1LL << 31)
 
 /* access macros */
 #define SP_ISSET(p, f)		bf_isset(&(p)->sp_flags, SP_FLAG_ ## f)
@@ -306,7 +307,7 @@ enum block_dtmf_mode {
 #include "crypto.h"
 #include "dtls.h"
 #include "dtmf.h"
-#include "arena.h"
+#include "memory_arena.h"
 #include "ssrc.h"
 
 
@@ -355,7 +356,6 @@ struct codec_store {
 				strip_full:1; // set by codec_store_strip
 };
 
-TYPED_GQUEUE(endpoint_map, struct endpoint_map)
 
 struct stream_params {
 	unsigned int		index; /* starting with 1 */
@@ -390,6 +390,8 @@ struct stream_params {
 };
 
 struct endpoint_map {
+	IQUEUE_LINK		media_link;
+	IQUEUE_LINK		call_link;
 	unsigned int		unique_id;
 	struct endpoint		endpoint;
 	unsigned int		num_ports; // per interface
@@ -397,6 +399,10 @@ struct endpoint_map {
 	sfd_intf_list_q		intf_sfds; /* list of struct sfd_intf_list - contains stream_fd list */
 	unsigned int		wildcard:1;
 };
+
+typedef IQUEUE(struct endpoint_map, media_link) endpoints_in_media_q;
+typedef IQUEUE(struct endpoint_map, call_link) endpoints_in_call_q;
+
 
 struct loop_protector {
 	unsigned int		len;
@@ -420,6 +426,8 @@ struct packet_stream {
 	 * Preempted by call->master_lock held in W.
 	 */
 	mutex_t			lock;
+	IQUEUE_LINK		media_link;
+	IQUEUE_LINK		call_link;
 
 	struct call_media	*media;		/* RO */
 	call_t			*call;		/* RO */
@@ -464,6 +472,10 @@ struct packet_stream {
 	/* ps->lock must be held for SETTING these: */
 	atomic64		ps_flags;
 };
+
+typedef IQUEUE(struct packet_stream, media_link) streams_in_media_q;
+typedef IQUEUE(struct packet_stream, call_link) streams_in_call_q;
+
 
 INLINE int64_t packet_stream_last_packet(const struct packet_stream *ps) {
 	int64_t lp1 = (int64_t)atomic64_get_na(&ps->last_packet_us);
@@ -512,6 +524,7 @@ enum {
 struct call_media {
 	struct call_monologue	*monologue;			/* RO */
 	call_t			*call;				/* RO */
+	IQUEUE_LINK		link;
 
 	unsigned int		index;				/* RO */
 	unsigned int		unique_id;			/* RO */
@@ -543,11 +556,14 @@ struct call_media {
 	candidate_q		ice_candidates; 		/* slice-alloc'd, as received */
 	unsigned int		media_rec_slot;
 
-	packet_stream_q		streams;			/* normally RTP + RTCP */
+	streams_in_media_q	streams;			/* normally RTP + RTCP */
 	struct endpoint_map	*endpoint_map;
-	endpoint_map_q		endpoint_maps;
+	endpoints_in_media_q	endpoint_maps;
 	struct ssrc_hash	ssrc_hash_in;
 	struct ssrc_hash	ssrc_hash_out;
+
+	/* fixed SSRC to use for RTP sent towards this media, 0 if unset */
+	uint32_t		fixed_egress_ssrc;
 
 	struct codec_store	codecs;
 	struct codec_store	offered_codecs;
@@ -599,6 +615,7 @@ struct call_media {
 	unsigned int		update_iter;
 };
 
+typedef IQUEUE(struct call_media, link) medias_in_call_q;
 TYPED_GPTRARRAY(medias_arr, struct call_media)
 
 
@@ -616,6 +633,7 @@ struct call_monologue {
 	call_t			*call;			/* RO */
 	str			call_id;		// RO - in case of merged calls with ID aliases
 	unsigned int		unique_id;		/* RO */
+	IQUEUE_LINK		link;
 
 	str			tag;
 	str			viabranch;
@@ -683,7 +701,11 @@ struct call_monologue {
 	struct call_checkpoint	*checkpoint;
 };
 
+typedef IQUEUE(struct call_monologue, link) monologues_in_call_q;
+
 TYPED_GHASHTABLE(str_ml_ht, str, struct call_monologue, str_hash, str_equal, NULL, NULL)
+TYPED_GHASHTABLE(alloc_str_ml_ht, str, struct call_monologue, str_hash, str_equal,
+		memory_arena_str_dup_free_lw, NULL)
 
 struct sdp_fragment;
 TYPED_GQUEUE(fragment, struct sdp_fragment)
@@ -789,17 +811,17 @@ struct call {
 	rwlock_t		master_lock;
 
 	/* everything below is protected by the master_lock */
-	monologues_q		monologues;	/* call_monologue */
-	medias_q		medias;		/* call_media */
+	monologues_in_call_q	monologues;
+	medias_in_call_q	medias;
 	str_ml_ht		tags;
 	str_ml_ht		viabranches;
 	str_ml_ht		labels;
-	str_ml_ht		sdps;
+	alloc_str_ml_ht		sdps;
 	endpoint_ml_ht		endpoints;
 	fragments_ht		sdp_fragments;
-	packet_stream_q		streams;
+	streams_in_call_q	streams;
 	stream_fd_q		stream_fds;	/* stream_fd */
-	endpoint_map_q		endpoint_maps;
+	endpoints_in_call_q	endpoint_maps;
 	struct dtls_cert	*dtls_cert;	/* for outgoing */
 	struct mqtt_timer	*mqtt_timer;
 
@@ -877,6 +899,7 @@ struct media_subscription *call_ml_get_top_ms(struct call_monologue *ml);
 bool call_ml_sendonly_inactive(struct call_monologue *ml);
 struct media_subscription *call_media_get_top_ms(struct call_media *cm);
 struct media_subscription *call_get_media_subscription(subscription_ht ht, struct call_media *cm);
+bool media_has_inject_subscriptions(const struct call_media *media);
 struct call_monologue *ml_medias_subscribed_to_single_ml(struct call_monologue *ml);
 
 __attribute__((nonnull(1)))
@@ -973,7 +996,6 @@ void call_media_unkernelize(struct call_media *media, const char *reason);
 void __monologue_unconfirm(struct call_monologue *monologue, const char *);
 void __media_unconfirm(struct call_media *media, const char *);
 
-__attribute__((nonnull(1)))
 /* one monologue's state from before an offer, held as a call record snapshot */
 struct call_checkpoint {
 	bool pending;
@@ -985,6 +1007,7 @@ void call_checkpoint_answer(call_t *, struct call_monologue *, struct call_monol
 int call_checkpoint_rollback(call_t *, struct call_monologue *, struct call_monologue *);
 void call_checkpoint_free_all(call_t *);
 
+__attribute__((nonnull(1)))
 void update_init_monologue_subscribers(struct call_monologue *ml, enum ng_opmode opmode);
 
 __attribute__((nonnull(1)))
@@ -1021,21 +1044,14 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC(call_q, call_q_unlock_release);
 #include "str.h"
 #include "rtp.h"
 
-#define call_malloc memory_arena_alloc
-#define call_dup memory_arena_dup
-
-#define call_strdup memory_arena_strdup
-#define call_strdup_str memory_arena_strdup_str
 #define call_str_cpy_len memory_arena_str_cpy_len
 #define call_str_cpy memory_arena_str_cpy
 #define call_str_cpy_c memory_arena_str_cpy_c
 #define call_str_dup memory_arena_str_dup
 
 INLINE void __call_unkernelize(call_t *call, const char *reason) {
-	for (__auto_type l = call->monologues.head; l; l = l->next) {
-		struct call_monologue *ml = l->data;
+	IQUEUE_FOREACH(&call->monologues, ml)
 		__monologue_unconfirm(ml, reason);
-	}
 }
 INLINE endpoint_t *packet_stream_local_addr(struct packet_stream *ps) {
 	if (ps->selected_sfd)
@@ -1059,7 +1075,7 @@ INLINE void call_memory_arena_release(void) {
 		return;
 	obj_put(call_memory_arena);
 	call_memory_arena = NULL;
-	memory_arena = &rtpe_arena;
+	memory_arena = NULL;
 }
 INLINE void call_memory_arena_set(call_t *c) {
 	call_memory_arena_release();

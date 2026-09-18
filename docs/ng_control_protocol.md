@@ -1367,6 +1367,29 @@ Spaces in each string may be replaced by hyphens.
     Legacy alias for `extmap=[strip=[all]]` to remove all `a=rtpmap` attributes
     from the outgoing SDP.
 
+* `force strip extmap`
+
+    Process RTP header extensions of forwarded media even if no header
+    extensions were negotiated in the SDP. Normally, RTP header extensions
+    are passed through untouched if neither side included any `a=extmap`
+    attributes. With this flag set, header extensions that were not
+    negotiated are removed from forwarded RTP. Once set, the flag remains
+    in effect for the lifetime of the call.
+
+* `fixed egress SSRC`
+
+    Pick an SSRC for each media at signalling time and use it for all RTP sent
+    towards that media, instead of passing through the SSRC that the other side
+    happens to be sending. The chosen values are returned in the response, and
+    they stay in place for the lifetime of the call, so a source that changes
+    its own SSRC mid-call is still forwarded under the same one, with the
+    sequence numbering carried across the change.
+
+    The same values are reported per media in the `query` response.
+
+    Intended for feeding media into a system that has to bind a receiver to an
+    SSRC up front, such as a WebRTC selective forwarding unit.
+
 * `strict source`
 
 	Normally, *rtpengine* attempts to learn the correct endpoint address for every stream during
@@ -1812,6 +1835,10 @@ SDP body that the SIP proxy should insert into the SIP message. If `supports`
 requested a supported extension, the response can also contain a `supported`
 list.
 
+With `fixed egress SSRC` set, the response also contains `egress SSRC`, a list with
+one entry per `m=` section of the returned SDP, in the same order. Each entry gives
+the `index` and `type` of the media along with the `SSRC` chosen for it.
+
 Example response:
 
 	{ "result": "ok", "sdp": "v=0\r\no=..." }
@@ -2024,6 +2051,12 @@ The response dictionary contains the following keys:
 
 			If the protocol is recognized by *rtpengine*, this string contains it.
 			Usually `RTP/AVP` or `RTP/SAVPF`.
+
+		+ `fixed egress SSRC`
+
+			The SSRC used for all RTP sent towards this media, if the
+			`fixed egress SSRC` flag was given. Reported as soon as the flag
+			takes effect, before any media has been forwarded.
 
 		+ `flags`
 
@@ -2767,7 +2800,9 @@ An optional key `source-call-id` can be given to identify the source
 participant in a different call. In this case both calls are merged internally
 before creating the injection.
 
-The command currently applies to audio media only.
+The command currently applies to audio media only. Mixing requires transcoding
+support and uses the audio player with the configured `--audio-buffer-length`
+and `--audio-buffer-delay` settings.
 
 Example:
 
@@ -2784,6 +2819,11 @@ Example:
 ## `inject stop` Message
 
 Stops one-way media injection previously started by `inject start`.
+
+Deleting the source participant or removing the injection with `unsubscribe`
+also stops the injection. Other injections and active media playback are
+preserved. The implicitly enabled audio player is stopped when no longer needed;
+independent audio-player settings continue to apply.
 
 The same participant selection keys as for `inject start` must be provided:
 

@@ -39,8 +39,8 @@ typedef union {
 	stream_fd_q *sfds_q;
 	medias_arr *ma;
 	sfd_intf_list_q *siq;
-	packet_stream_q *psq;
-	endpoint_map_q *emq;
+	streams_in_media_q *psq;
+	endpoints_in_media_q *emq;
 } callback_arg_t __attribute__ ((__transparent_union__));
 
 
@@ -1320,16 +1320,28 @@ static int json_build_list_cb(callback_arg_t q, call_t *c, const char *key,
 	return 0;
 }
 
-static int rbl_cb_simple(str *s, callback_arg_t qp, struct redis_list *list, void *ptr) {
-	GQueue *q = qp.q;
+static int rbl_cb_simple(str *s, GQueue *q, struct redis_list *list, void *ptr) {
 	int j;
 	j = str_to_i(s, 0);
 	g_queue_push_tail(q, redis_list_get_idx_ptr(list, (unsigned) j));
 	return 0;
 }
 
-static int rbpa_cb_simple(str *s, callback_arg_t pap, struct redis_list *list, void *ptr) {
-	medias_arr *pa = pap.ma;
+static int rbl_cb_ps_list(str *s, streams_in_media_q *q, struct redis_list *list, void *ptr) {
+	int j;
+	j = str_to_i(s, 0);
+	i_queue_push_tail(q, redis_list_get_idx_ptr(list, (unsigned) j));
+	return 0;
+}
+
+static int rbl_cb_em_list(str *s, endpoints_in_media_q *q, struct redis_list *list, void *ptr) {
+	int j;
+	j = str_to_i(s, 0);
+	i_queue_push_tail(q, redis_list_get_idx_ptr(list, (unsigned) j));
+	return 0;
+}
+
+static int rbpa_cb_simple(str *s, medias_arr *pa, struct redis_list *list, void *ptr) {
 	int j;
 	j = str_to_i(s, 0);
 	t_ptr_array_add(pa, redis_list_get_idx_ptr(list, (unsigned) j));
@@ -1340,6 +1352,18 @@ static int json_build_list(callback_arg_t q, call_t *c, const char *key,
 		unsigned int idx, struct redis_list *list, parser_arg arg)
 {
 	return json_build_list_cb(q, c, key, idx, list, rbl_cb_simple, NULL, arg);
+}
+
+static int json_build_ps_list(callback_arg_t q, call_t *c, const char *key,
+		unsigned int idx, struct redis_list *list, parser_arg arg)
+{
+	return json_build_list_cb(q, c, key, idx, list, rbl_cb_ps_list, NULL, arg);
+}
+
+static int json_build_em_list(callback_arg_t q, call_t *c, const char *key,
+		unsigned int idx, struct redis_list *list, parser_arg arg)
+{
+	return json_build_list_cb(q, c, key, idx, list, rbl_cb_em_list, NULL, arg);
 }
 
 static int json_build_ptra(medias_arr *q, call_t *c, const char *key,
@@ -1572,39 +1596,39 @@ static void redis_decode_monologue_sdp(struct call_monologue *ml, const struct r
 	long il;
 	/* s= */
 	if (!redis_hash_get_str(&s, rh, "sdp_session_name"))
-		ml->sdp_session_name = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&ml->sdp_session_name, &s);
 	/* t= */
 	if (!redis_hash_get_str(&s, rh, "sdp_session_timing"))
-		ml->sdp_session_timing = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&ml->sdp_session_timing, &s);
 	/* o= */
 	if (!redis_hash_get_str(&s, rh, "sdp_orig_parsed")) {
 		ml->sdp_orig_in.parsed = 1;
 		redis_hash_get_llu(&ml->sdp_orig_in.version_num, rh, "sdp_orig_version_num");
 		if (!redis_hash_get_str(&s, rh, "sdp_orig_username"))
-			ml->sdp_orig_in.username = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_in.username, &s);
 		if (!redis_hash_get_str(&s, rh, "sdp_orig_session_id"))
-			ml->sdp_orig_in.session_id = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_in.session_id, &s);
 		if (!redis_hash_get_str(&s, rh, "sdp_orig_address_network_type"))
-			ml->sdp_orig_in.address.network_type = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_in.address.network_type, &s);
 		if (!redis_hash_get_str(&s, rh, "sdp_orig_address_address_type"))
-			ml->sdp_orig_in.address.address_type = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_in.address.address_type, &s);
 		if (!redis_hash_get_str(&s, rh, "sdp_orig_address_address"))
-			ml->sdp_orig_in.address.address = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_in.address.address, &s);
 	}
 	/* o= last used of the other side*/
 	if (!redis_hash_get_str(&s, rh, "last_sdp_orig_parsed")) {
 		ml->sdp_orig_out.parsed = 1;
 		redis_hash_get_llu(&ml->sdp_orig_out.version_num, rh, "last_sdp_orig_version_num");
 		if (!redis_hash_get_str(&s, rh, "last_sdp_orig_username"))
-			ml->sdp_orig_out.username = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_out.username, &s);
 		if (!redis_hash_get_str(&s, rh, "last_sdp_orig_session_id"))
-			ml->sdp_orig_out.session_id = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_out.session_id, &s);
 		if (!redis_hash_get_str(&s, rh, "last_sdp_orig_address_network_type"))
-			ml->sdp_orig_out.address.network_type = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_out.address.network_type, &s);
 		if (!redis_hash_get_str(&s, rh, "last_sdp_orig_address_address_type"))
-			ml->sdp_orig_out.address.address_type = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_out.address.address_type, &s);
 		if (!redis_hash_get_str(&s, rh, "last_sdp_orig_address_address"))
-			ml->sdp_orig_out.address.address = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->sdp_orig_out.address.address, &s);
 	}
 
 	ml->sdp_session_bandwidth.as = (!redis_hash_get_ld(&il, rh, "sdp_session_as")) ? il : -1;
@@ -1634,13 +1658,13 @@ static int redis_tags(call_t *c, struct redis_list *tags, parser_arg arg) {
 		if (!redis_hash_get_str(&s, rh, "tag"))
 			__monologue_tag(ml, &s);
 		if (!redis_hash_get_str(&s, rh, "call_id"))
-			ml->call_id = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->call_id, &s);
 		if (!redis_hash_get_str(&s, rh, "via-branch"))
 			__monologue_viabranch(ml, &s);
 		if (!redis_hash_get_str(&s, rh, "label"))
-			ml->label = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->label, &s);
 		if (!redis_hash_get_str(&s, rh, "metadata"))
-			ml->metadata = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&ml->metadata, &s);
 		redis_hash_get_time_t(&ml->deleted_us, rh, "deleted");
 		if (!redis_hash_get_int(&ii, rh, "block_dtmf"))
 			ml->block_dtmf = ii;
@@ -1716,7 +1740,7 @@ static int redis_decode_media_fields(struct call_media *med, const struct redis_
 		return -1;
 	med->desired_family = get_socket_family_rfc(&s);
 
-	med->format_str = !redis_hash_get_str(&s, rh, "format_str") ? call_str_cpy(&s) : STR_NULL;
+	memory_arena_str_cpy_free(&med->format_str, !redis_hash_get_str(&s, rh, "format_str") ? &s : NULL);
 
 	/* bandwidth data is not critical */
 	med->sdp_media_bandwidth.as = (!redis_hash_get_ld(&il, rh, "bandwidth_as")) ? il : -1;
@@ -1743,10 +1767,12 @@ static int json_medias(call_t *c, struct redis_list *medias, struct redis_list *
 			return -1;
 		if (redis_hash_get_str(&s, rh, "type"))
 			return -1;
-		med->type = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&med->type, &s);
 		med->type_id = codec_get_type(&med->type);
 		if (!redis_hash_get_str(&s, rh, "media_id"))
-			med->media_id = call_str_cpy(&s);
+			memory_arena_str_cpy_free(&med->media_id, &s);
+		if (!redis_hash_get_str(&s, rh, "label"))
+			memory_arena_str_cpy_free(&med->label, &s);
 
 		if (redis_decode_media_fields(med, rh))
 			return -1;
@@ -1798,7 +1824,7 @@ static int redis_maps(call_t *c, struct redis_list *maps) {
 		rh = &maps->rh[i];
 
 		/* from call.c:__get_endpoint_map() */
-		em = uid_alloc(&c->endpoint_maps);
+		em = iuid_alloc(&c->endpoint_maps);
 		t_queue_init(&em->intf_sfds);
 
 		em->wildcard = redis_hash_get_bool_flag(rh, "wildcard");
@@ -1889,7 +1915,7 @@ static int rbl_subs_cb(str *s, callback_arg_t dummy, struct redis_list *list, vo
 
 static int cb_tag_aliases(str *s, callback_arg_t dummy, struct redis_list *list, void *ptr) {
 	struct call_monologue *ml = ptr;
-	t_queue_push_tail(&ml->tag_aliases, call_str_dup(s));
+	t_queue_push_tail(&ml->tag_aliases, memory_arena_str_dup_lw(s));
 	return 0;
 }
 
@@ -2030,9 +2056,9 @@ static int json_link_medias(call_t *c, struct redis_list *medias,
 		struct call_media *med = medias->ptrs[i];
 		if (!med || !med->monologue)
 			continue;
-		if (json_build_list(&med->streams, c, "streams", i, streams, arg))
+		if (json_build_ps_list(&med->streams, c, "streams", i, streams, arg))
 			return -1;
-		if (json_build_list(&med->endpoint_maps, c, "maps", i, maps, arg))
+		if (json_build_em_list(&med->endpoint_maps, c, "maps", i, maps, arg))
 			return -1;
 
 		if (med->media_id.s)
@@ -2048,8 +2074,7 @@ static int json_link_medias(call_t *c, struct redis_list *medias,
 	return 0;
 }
 
-static int rbl_cb_intf_sfds(str *s, callback_arg_t qp, struct redis_list *list, void *ptr) {
-	sfd_intf_list_q *q = qp.siq;
+static int rbl_cb_intf_sfds(str *s, sfd_intf_list_q *q, struct redis_list *list, void *ptr) {
 	int i;
 	struct sfd_intf_list *il;
 	struct endpoint_map *em;
@@ -2148,8 +2173,7 @@ static int checkpoint_get_int(int64_t *out, const struct redis_hash *h, const ch
 }
 
 static int redis_restore_checkpoints(call_t *c, parser_arg root) {
-	for (__auto_type l = c->monologues.head; l; l = l->next) {
-		struct call_monologue *ml = l->data;
+	IQUEUE_FOREACH(&c->monologues, ml) {
 		struct redis_hash rh;
 		// absent for a call written by a version that had no checkpoints
 		if (json_get_hash(&rh, "checkpoint", ml->unique_id, root))
@@ -2182,7 +2206,7 @@ static int redis_restore_checkpoints(call_t *c, parser_arg root) {
 
 struct redis_parsed_record {
 	JsonParser *json;
-	bencode_buffer_t benc;
+	arena_t benc;
 	bool benc_valid;
 	const ng_parser_t *parser;
 };
@@ -2207,7 +2231,7 @@ static const char *redis_parse_record(const str *record, parser_arg *root,
 	}
 
 	if (record->s[0] == 'd') {
-		if (bencode_buffer_init(&out->benc))
+		if (!arena_init(&out->benc, g_malloc, g_free))
 			return "failed to initialise bencode buffer";
 		out->benc_valid = true;
 		bencode_item_t *benc_root = bencode_decode_expect_str(&out->benc, record,
@@ -2226,7 +2250,7 @@ static void redis_parsed_record_free(struct redis_parsed_record *p) {
 	if (p->json)
 		g_object_unref(p->json);
 	if (p->benc_valid)
-		bencode_buffer_free(&p->benc);
+		arena_free(&p->benc);
 }
 
 static void json_restore_call(struct redis *r, const str *callid, bool foreign) {
@@ -2311,7 +2335,7 @@ static void json_restore_call(struct redis *r, const str *callid, bool foreign) 
 	redis_hash_get_time_t(&c->deleted_us, &call, "deleted");
 	redis_hash_get_time_t(&c->ml_deleted_us, &call, "ml_deleted");
 	if (!redis_hash_get_str(&id, &call, "created_from"))
-		c->created_from = call_str_cpy(&id);
+		memory_arena_str_cpy_free(&c->created_from, &id);
 	if (!redis_hash_get_int(&i, &call, "block_dtmf"))
 		c->block_dtmf = i;
 	if (!redis_hash_get_a64(&a64, &call, "call_flags"))
@@ -2361,18 +2385,18 @@ static void json_restore_call(struct redis *r, const str *callid, bool foreign) 
 
 	// presence of this key determines whether we were recording at all
 	if (!redis_hash_get_str(&s, &call, "recording_meta_prefix")) {
-		c->recording_meta_prefix = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&c->recording_meta_prefix, &s);
 		// coverity[check_return : FALSE]
 		redis_hash_get_str(&s, &call, "recording_metadata");
-		c->metadata = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&c->metadata, &s);
 		redis_hash_get_str(&s, &call, "recording_file");
-		c->recording_file = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&c->recording_file, &s);
 		redis_hash_get_str(&s, &call, "recording_path");
-		c->recording_path = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&c->recording_path, &s);
 		redis_hash_get_str(&s, &call, "recording_pattern");
-		c->recording_pattern = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&c->recording_pattern, &s);
 		redis_hash_get_str(&s, &call, "recording_random_tag");
-		c->recording_random_tag = call_str_cpy(&s);
+		memory_arena_str_cpy_free(&c->recording_random_tag, &s);
 		recording_start_daemon(c);
 	}
 
@@ -2668,65 +2692,348 @@ static void json_update_detected_endpoints(const ng_parser_t *parser, parser_arg
 				? endpoint_print_buf(&ps->detected_endpoints[i]) : "");
 }
 
-/**
- * encodes the few (k,v) pairs for one call under one json structure
- */
 
+static void redis_encode_ml_basic(struct call_monologue *ml, const ng_parser_t *parser, parser_arg root) {
+	char tmp[128];
 
-// scope = write only these monologues' state, plus the state only a rollback
-// reads. NULL writes the whole call, which is what the Redis record wants.
-static bool ml_in_scope(struct call_monologue * const *scope, const struct call_monologue *ml) {
-	return !scope || ml == scope[0] || ml == scope[1];
+	snprintf(tmp, sizeof(tmp), "tag-%u", ml->unique_id);
+	parser_arg inner = parser->dict_add_dict_dup(root, tmp);
+
+	JSON_SET_SIMPLE("created", "%" PRId64, ml->created_us);
+	JSON_SET_SIMPLE("deleted", "%" PRId64, ml->deleted_us);
+	JSON_SET_SIMPLE("block_dtmf", "%i", ml->block_dtmf);
+	JSON_SET_SIMPLE("ml_flags", "%" PRIu64, atomic64_get_na(&ml->ml_flags));
+	JSON_SET_SIMPLE_CSTR("desired_family", ml->desired_family ? ml->desired_family->rfc_name : "");
+	if (ml->logical_intf)
+		JSON_SET_SIMPLE_STR("logical_intf", &ml->logical_intf->name);
+
+	if (ml->tag.s)
+		JSON_SET_SIMPLE_STR("tag", &ml->tag);
+	if (ml->call_id.s)
+		JSON_SET_SIMPLE_STR("call_id", &ml->tag);
+	if (ml->viabranch.s)
+		JSON_SET_SIMPLE_STR("via-branch", &ml->viabranch);
+	if (ml->label.s)
+		JSON_SET_SIMPLE_STR("label", &ml->label);
+	if (ml->metadata.s)
+		JSON_SET_SIMPLE_STR("metadata", &ml->metadata);
+
+	JSON_SET_SIMPLE_STR("sdp_session_name", &ml->sdp_session_name);
+	JSON_SET_SIMPLE_STR("sdp_session_timing", &ml->sdp_session_timing);
+
+	if (ml->sdp_orig_in.parsed) {
+		JSON_SET_SIMPLE_STR("sdp_orig_username", &ml->sdp_orig_in.username);
+		JSON_SET_SIMPLE_STR("sdp_orig_session_id", &ml->sdp_orig_in.session_id);
+		JSON_SET_SIMPLE("sdp_orig_version_num", "%llu", ml->sdp_orig_in.version_num);
+		JSON_SET_SIMPLE("sdp_orig_parsed", "%u", ml->sdp_orig_in.parsed);
+		JSON_SET_SIMPLE_STR("sdp_orig_address_network_type", &ml->sdp_orig_in.address.network_type);
+		JSON_SET_SIMPLE_STR("sdp_orig_address_address_type", &ml->sdp_orig_in.address.address_type);
+		JSON_SET_SIMPLE_STR("sdp_orig_address_address", &ml->sdp_orig_in.address.address);
+	}
+	if (ml->sdp_orig_out.parsed) {
+		JSON_SET_SIMPLE_STR("last_sdp_orig_username", &ml->sdp_orig_out.username);
+		JSON_SET_SIMPLE_STR("last_sdp_orig_session_id", &ml->sdp_orig_out.session_id);
+		JSON_SET_SIMPLE("last_sdp_orig_version_num", "%llu", ml->sdp_orig_out.version_num);
+		JSON_SET_SIMPLE("last_sdp_orig_parsed", "%u", ml->sdp_orig_out.parsed);
+		JSON_SET_SIMPLE_STR("last_sdp_orig_address_network_type", &ml->sdp_orig_out.address.network_type);
+		JSON_SET_SIMPLE_STR("last_sdp_orig_address_address_type", &ml->sdp_orig_out.address.address_type);
+		JSON_SET_SIMPLE_STR("last_sdp_orig_address_address", &ml->sdp_orig_out.address.address);
+	}
+
+	if (ml->sdp_session_bandwidth.as >= 0)
+		JSON_SET_SIMPLE("sdp_session_as", "%ld", ml->sdp_session_bandwidth.as);
+	if (ml->sdp_session_bandwidth.ct >= 0)
+		JSON_SET_SIMPLE("sdp_session_ct", "%ld", ml->sdp_session_bandwidth.ct);
+	if (ml->sdp_session_bandwidth.rr >= 0)
+		JSON_SET_SIMPLE("sdp_session_rr", "%ld", ml->sdp_session_bandwidth.rr);
+	if (ml->sdp_session_bandwidth.rs >= 0)
+		JSON_SET_SIMPLE("sdp_session_rs", "%ld", ml->sdp_session_bandwidth.rs);
+	if (ml->sdp_session_bandwidth.tias >= 0)
+		JSON_SET_SIMPLE("sdp_session_tias", "%ld", ml->sdp_session_bandwidth.tias);
+	if (ml->last_out_sdp && ml->last_out_sdp->len)
+		JSON_SET_SIMPLE_LEN("last_out_sdp", ml->last_out_sdp->len,
+				ml->last_out_sdp->str);
+
+	snprintf(tmp, sizeof(tmp), "medias-%u", ml->unique_id);
+	inner = parser->dict_add_list_dup(root, tmp);
+	for (unsigned int j = 0; j < ml->medias->len; j++) {
+		struct call_media *media = ml->medias->pdata[j];
+		JSON_ADD_LIST_STRING("%u", media ? media->unique_id : -1);
+	}
+
 }
 
-static str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free,
-		struct call_monologue * const *scope)
-{
 
+static parser_arg redis_encode_media_basic(struct call_media *media, const ng_parser_t *parser, parser_arg root) {
+	char tmp[128];
+
+	snprintf(tmp, sizeof(tmp), "payload_types-%u", media->unique_id);
+	parser_arg inner = parser->dict_add_list_dup(root, tmp);
+	redis_encode_codec_store(parser, inner, &media->codecs);
+
+	// SSRC table dump
+	// XXX needs fixing
+	LOCK(&media->ssrc_hash_in.lock);
+	snprintf(tmp, sizeof(tmp), "ssrc_table-%u", media->unique_id);
+	parser_arg list = parser->dict_add_list_dup(root, tmp);
+	for (GList *m = media->ssrc_hash_in.nq.head; m; m = m->next) {
+		struct ssrc_entry_call *se = m->data;
+		inner = parser->list_add_dict(list);
+
+		JSON_SET_SIMPLE("ssrc", "%" PRIu32, se->h.ssrc);
+		// XXX use function for in/out
+		JSON_SET_SIMPLE("in_srtp_index", "%u", atomic_get_na(&se->stats->ext_seq));
+		JSON_SET_SIMPLE("in_srtcp_index", "%u", atomic_get_na(&se->stats->rtcp_seq));
+		JSON_SET_SIMPLE("in_payload_type", "%i", se->tracker.most[0]);
+		//JSON_SET_SIMPLE("out_srtp_index", "%u", atomic_get_na(&se->output_ctx.stats->ext_seq));
+		//JSON_SET_SIMPLE("out_srtcp_index", "%u", atomic_get_na(&se->output_ctx.stats->rtcp_seq));
+		//JSON_SET_SIMPLE("out_payload_type", "%i", se->output_ctx.tracker.most[0]);
+		// XXX add rest of info
+	}
+
+	snprintf(tmp, sizeof(tmp), "media-%u", media->unique_id);
+	inner = parser->dict_add_dict_dup(root, tmp);
+
+	JSON_SET_SIMPLE("tag","%u", media->monologue->unique_id);
+	JSON_SET_SIMPLE("index","%u", media->index);
+	JSON_SET_SIMPLE_STR("type", &media->type);
+	if (media->format_str.s)
+		JSON_SET_SIMPLE_STR("format_str", &media->format_str);
+	if (media->media_id.s)
+		JSON_SET_SIMPLE_STR("media_id", &media->media_id);
+	if (media->label.s)
+		JSON_SET_SIMPLE_STR("label", &media->label);
+	JSON_SET_SIMPLE_CSTR("protocol", media->protocol ? media->protocol->name : "");
+	JSON_SET_SIMPLE_CSTR("desired_family", media->desired_family ? media->desired_family->rfc_name : "");
+	if (media->logical_intf)
+		JSON_SET_SIMPLE_STR("logical_intf", &media->logical_intf->name);
+	JSON_SET_SIMPLE("ptime","%i", media->ptime);
+	JSON_SET_SIMPLE("maxptime","%i", media->maxptime);
+	JSON_SET_SIMPLE("media_flags", "%" PRIu64, atomic64_get_na(&media->media_flags));
+
+	if (media->sdp_media_bandwidth.as >= 0)
+		JSON_SET_SIMPLE("bandwidth_as","%ld", media->sdp_media_bandwidth.as);
+	if (media->sdp_media_bandwidth.rr >= 0)
+		JSON_SET_SIMPLE("bandwidth_rr","%ld", media->sdp_media_bandwidth.rr);
+	if (media->sdp_media_bandwidth.rs >= 0)
+		JSON_SET_SIMPLE("bandwidth_rs","%ld", media->sdp_media_bandwidth.rs);
+	if (media->sdp_media_bandwidth.ct >= 0)
+		JSON_SET_SIMPLE("bandwidth_ct","%ld", media->sdp_media_bandwidth.ct);
+	if (media->sdp_media_bandwidth.tias >= 0)
+		JSON_SET_SIMPLE("bandwidth_tias","%ld", media->sdp_media_bandwidth.tias);
+
+	redis_encode_sdes_params(parser, inner, "sdes_in", &media->sdes_in);
+	redis_encode_sdes_params(parser, inner, "sdes_out", &media->sdes_out);
+	redis_encode_dtls_fingerprint(parser, inner, &media->fingerprint);
+
+	return inner;
+}
+
+
+static parser_arg redis_encode_stream_basic(struct packet_stream *ps, const ng_parser_t *parser, parser_arg root) {
+	char tmp[128];
+
+	snprintf(tmp, sizeof(tmp), "stream_sfds-%u", ps->unique_id);
+	parser_arg inner = parser->dict_add_list_dup(root, tmp);
+	for (__auto_type k = ps->sfds.head; k; k = k->next) {
+		stream_fd *sfd = k->data;
+		JSON_ADD_LIST_STRING("%u", sfd->unique_id);
+	}
+
+	snprintf(tmp, sizeof(tmp), "stream-%u", ps->unique_id);
+	inner = parser->dict_add_dict_dup(root, tmp);
+
+	JSON_SET_SIMPLE("media","%u",ps->media->unique_id);
+	JSON_SET_SIMPLE("sfd","%u",ps->selected_sfd ? ps->selected_sfd->unique_id : -1);
+	JSON_SET_SIMPLE("rtcp_sibling","%u",ps->rtcp_sibling ? ps->rtcp_sibling->unique_id : -1);
+	JSON_SET_SIMPLE("ps_flags", "%" PRIu64, atomic64_get_na(&ps->ps_flags));
+	JSON_SET_SIMPLE("component","%u",ps->component);
+	JSON_SET_SIMPLE_CSTR("endpoint",endpoint_print_buf(&ps->endpoint));
+	JSON_SET_SIMPLE_CSTR("advertised_endpoint",endpoint_print_buf(&ps->advertised_endpoint));
+
+	JSON_SET_SIMPLE("stats-packets","%" PRIu64, atomic64_get_na(&ps->stats_in->packets));
+	JSON_SET_SIMPLE("stats-bytes","%" PRIu64, atomic64_get_na(&ps->stats_in->bytes));
+	JSON_SET_SIMPLE("stats-errors","%" PRIu64, atomic64_get_na(&ps->stats_in->errors));
+
+	json_update_crypto_params(parser, inner, "", &ps->crypto.params);
+
+	return inner;
+}
+
+
+static str redis_encode_json_ml(ng_parser_ctx_t *ctx, call_t *c, void **to_free,
+		struct call_monologue *ml)
+{
 	char tmp[128];
 	const ng_parser_t *parser = ctx->parser;
 
 	parser_arg root = parser->dict(ctx);
 
-	{
-		parser_arg inner = {0};
+	parser_arg inner;
 
-		if (!scope) {
-			inner = parser->dict_add_dict(root, "json");
-			JSON_SET_SIMPLE("created","%" PRId64, c->created);
-			JSON_SET_SIMPLE("destroyed","%" PRId64, c->destroyed);
-			JSON_SET_SIMPLE("last_signal","%" PRId64, c->last_signal_us);
-			JSON_SET_SIMPLE("tos","%u", (int) c->tos);
-			JSON_SET_SIMPLE("deleted","%" PRId64, c->deleted_us);
-			JSON_SET_SIMPLE("num_sfds","%u", t_queue_get_length(&c->stream_fds));
-			JSON_SET_SIMPLE("num_streams","%u", t_queue_get_length(&c->streams));
-			JSON_SET_SIMPLE("num_medias","%u", t_queue_get_length(&c->medias));
-			JSON_SET_SIMPLE("num_tags","%u", t_queue_get_length(&c->monologues));
-			JSON_SET_SIMPLE("num_maps","%u", t_queue_get_length(&c->endpoint_maps));
-			JSON_SET_SIMPLE("ml_deleted","%" PRId64, c->ml_deleted_us);
-			JSON_SET_SIMPLE("redis_hosted_db","%u", c->redis_hosted_db);
-			JSON_SET_SIMPLE_STR("recording_metadata", &c->metadata);
-			JSON_SET_SIMPLE("block_dtmf","%i", c->block_dtmf);
-			JSON_SET_SIMPLE("call_flags", "%" PRIu64, atomic64_get_na(&c->call_flags));
+	redis_encode_ml_basic(ml, parser, root);
 
-			if (c->created_from.len)
-				JSON_SET_SIMPLE_STR("created_from", &c->created_from);
-			if (c->recording_meta_prefix.len)
-				JSON_SET_SIMPLE_STR("recording_meta_prefix", &c->recording_meta_prefix);
-			if (c->recording_file.len)
-				JSON_SET_SIMPLE_STR("recording_file", &c->recording_file);
-			if (c->recording_path.len)
-				JSON_SET_SIMPLE_STR("recording_path", &c->recording_path);
-			if (c->recording_pattern.len)
-				JSON_SET_SIMPLE_STR("recording_pattern", &c->recording_pattern);
-			if (c->recording_random_tag.len)
-				JSON_SET_SIMPLE_STR("recording_random_tag", &c->recording_random_tag);
+	for (unsigned int i = 0; i < ml->medias->len; i++) {
+		__auto_type media = ml->medias->pdata[i];
+		if (!media)
+			continue;
+
+		inner = redis_encode_media_basic(media, parser, root);
+
+		if (media->tls_id.s)
+			JSON_SET_SIMPLE_STR("tls_id", &media->tls_id);
+		if (media->fp_hash_func)
+			JSON_SET_SIMPLE_CSTR("preferred_hash_func",
+					media->fp_hash_func->name);
+		if (media->endpoint_map)
+			JSON_SET_SIMPLE("endpoint_map", "%u",
+					media->endpoint_map->unique_id);
+
+		unsigned int num_cands = 0;
+		for (__auto_type m = media->ice_candidates.head; m; m = m->next)
+			num_cands++;
+		JSON_SET_SIMPLE("num_ice_candidates", "%u", num_cands);
+		JSON_SET_SIMPLE("had_ice", "%i", media->ice_agent ? 1 : 0);
+		if (media->ice_agent) {
+			JSON_SET_SIMPLE_STR("ice_ufrag_local", &media->ice_agent->ufrag[0]);
+			JSON_SET_SIMPLE_STR("ice_ufrag_remote", &media->ice_agent->ufrag[1]);
+			JSON_SET_SIMPLE_STR("ice_pwd_local", &media->ice_agent->pwd[0]);
+			JSON_SET_SIMPLE_STR("ice_pwd_remote", &media->ice_agent->pwd[1]);
 		}
 
-		for (__auto_type l = scope ? NULL : c->monologues.head; l; l = l->next) {
-			const struct call_monologue *ml = l->data;
-			if (!ml->checkpoint)
+		unsigned int ci = 0;
+		for (__auto_type m = media->ice_candidates.head; m; m = m->next, ci++) {
+			const struct ice_candidate *cand = m->data;
+			snprintf(tmp, sizeof(tmp), "ice_candidate-%u-%u", media->unique_id, ci);
+			inner = parser->dict_add_dict_dup(root, tmp);
+			JSON_SET_SIMPLE_STR("foundation", &cand->foundation);
+			JSON_SET_SIMPLE("component", "%lu", (unsigned long) cand->component_id);
+			JSON_SET_SIMPLE_CSTR("transport",
+					cand->transport ? cand->transport->name : "");
+			JSON_SET_SIMPLE("priority", "%lu", (unsigned long) cand->priority);
+			JSON_SET_SIMPLE("type", "%u", cand->type);
+			JSON_SET_SIMPLE_STR("ufrag", &cand->ufrag);
+			JSON_SET_SIMPLE_CSTR("endpoint",
+					cand->endpoint.address.family
+					? endpoint_print_buf(&cand->endpoint) : "");
+			JSON_SET_SIMPLE_CSTR("related",
+					cand->related.address.family
+					? endpoint_print_buf(&cand->related) : "");
+		}
+
+		snprintf(tmp, sizeof(tmp), "offered_payload_types-%u", media->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		redis_encode_codec_store(parser, inner, &media->offered_codecs);
+
+		IQUEUE_FOREACH(&media->streams, ps) {
+			if (!ps->media)
 				continue;
+
+			LOCK(&ps->lock);
+
+			inner = redis_encode_stream_basic(ps, parser, root);
+
+			JSON_SET_SIMPLE_CSTR("learned_endpoint",
+					ps->learned_endpoint.address.family
+					? endpoint_print_buf(&ps->learned_endpoint) : "");
+			JSON_SET_SIMPLE_CSTR("last_local_endpoint",
+					ps->last_local_endpoint.address.family
+					? endpoint_print_buf(&ps->last_local_endpoint) : "");
+			JSON_SET_SIMPLE("ep_detect_signal", "%" PRId64, ps->ep_detect_signal);
+			JSON_SET_SIMPLE("el_flags", "%u", ps->el_flags);
+			json_update_detected_endpoints(parser, inner, ps);
+		}
+	}
+
+	return parser->collapse(ctx, root, to_free);
+}
+
+
+static str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free)
+{
+	char tmp[128];
+	const ng_parser_t *parser = ctx->parser;
+
+	parser_arg root = parser->dict(ctx);
+
+	parser_arg inner;
+
+	inner = parser->dict_add_dict(root, "json");
+	JSON_SET_SIMPLE("created","%" PRId64, c->created);
+	JSON_SET_SIMPLE("destroyed","%" PRId64, c->destroyed);
+	JSON_SET_SIMPLE("last_signal","%" PRId64, c->last_signal_us);
+	JSON_SET_SIMPLE("tos","%u", (int) c->tos);
+	JSON_SET_SIMPLE("deleted","%" PRId64, c->deleted_us);
+	JSON_SET_SIMPLE("num_sfds","%u", t_queue_get_length(&c->stream_fds));
+	JSON_SET_SIMPLE("num_streams","%u", t_queue_get_length(&c->streams));
+	JSON_SET_SIMPLE("num_medias","%u", t_queue_get_length(&c->medias));
+	JSON_SET_SIMPLE("num_tags","%u", t_queue_get_length(&c->monologues));
+	JSON_SET_SIMPLE("num_maps","%u", t_queue_get_length(&c->endpoint_maps));
+	JSON_SET_SIMPLE("ml_deleted","%" PRId64, c->ml_deleted_us);
+	JSON_SET_SIMPLE("redis_hosted_db","%u", c->redis_hosted_db);
+	JSON_SET_SIMPLE_STR("recording_metadata", &c->metadata);
+	JSON_SET_SIMPLE("block_dtmf","%i", c->block_dtmf);
+	JSON_SET_SIMPLE("call_flags", "%" PRIu64, atomic64_get_na(&c->call_flags));
+
+	if (c->created_from.len)
+		JSON_SET_SIMPLE_STR("created_from", &c->created_from);
+	if (c->recording_meta_prefix.len)
+		JSON_SET_SIMPLE_STR("recording_meta_prefix", &c->recording_meta_prefix);
+	if (c->recording_file.len)
+		JSON_SET_SIMPLE_STR("recording_file", &c->recording_file);
+	if (c->recording_path.len)
+		JSON_SET_SIMPLE_STR("recording_path", &c->recording_path);
+	if (c->recording_pattern.len)
+		JSON_SET_SIMPLE_STR("recording_pattern", &c->recording_pattern);
+	if (c->recording_random_tag.len)
+		JSON_SET_SIMPLE_STR("recording_random_tag", &c->recording_random_tag);
+
+	for (__auto_type l = c->stream_fds.head; l; l = l->next) {
+		stream_fd *sfd = l->data;
+
+		snprintf(tmp, sizeof(tmp), "sfd-%u", sfd->unique_id);
+		inner = parser->dict_add_dict_dup(root, tmp);
+
+		JSON_SET_SIMPLE_CSTR("pref_family", sfd->local_intf->logical->preferred_family->rfc_name);
+		JSON_SET_SIMPLE("localport","%u", sfd->socket.local.port);
+		JSON_SET_SIMPLE("fd", "%i", sfd->socket.fd);
+		JSON_SET_SIMPLE_STR("logical_intf", &sfd->local_intf->logical->name);
+		JSON_SET_SIMPLE("local_intf_uid","%u", sfd->local_intf->unique_id);
+		JSON_SET_SIMPLE("stream","%u", sfd->stream->unique_id);
+
+		json_update_crypto_params(parser, inner, "", &sfd->crypto.params);
+
+	} // --- for
+
+	IQUEUE_FOREACH(&c->streams, ps) {
+		if (!ps->media)
+			continue;
+
+		LOCK(&ps->lock);
+
+		redis_encode_stream_basic(ps, parser, root);
+
+		snprintf(tmp, sizeof(tmp), "rtp_sinks-%u", ps->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		for (__auto_type k = ps->rtp_sinks.head; k; k = k->next) {
+			struct sink_handler *sh = k->data;
+			struct packet_stream *sink = sh->sink;
+			JSON_ADD_LIST_STRING("%u", sink->unique_id);
+		}
+
+		snprintf(tmp, sizeof(tmp), "rtcp_sinks-%u", ps->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		for (__auto_type k = ps->rtcp_sinks.head; k; k = k->next) {
+			struct sink_handler *sh = k->data;
+			struct packet_stream *sink = sh->sink;
+			JSON_ADD_LIST_STRING("%u", sink->unique_id);
+		}
+	} // --- for streams.head
+
+	IQUEUE_FOREACH(&c->monologues, ml) {
+		redis_encode_ml_basic(ml, parser, root);
+
+		if (ml->checkpoint) {
 			snprintf(tmp, sizeof(tmp), "checkpoint-%u", ml->unique_id);
 			inner = parser->dict_add_dict_dup(root, tmp);
 			JSON_SET_SIMPLE("pending", "%i", ml->checkpoint->pending ? 1 : 0);
@@ -2741,361 +3048,72 @@ static str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free,
 			}
 		}
 
-		for (__auto_type l = scope ? NULL : c->stream_fds.head; l; l = l->next) {
-			stream_fd *sfd = l->data;
+		GList *k = g_hash_table_get_values(ml->associated_tags);
+		snprintf(tmp, sizeof(tmp), "associated_tags-%u", ml->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		for (GList *m = k; m; m = m->next) {
+			struct call_monologue *ml2 = m->data;
+			JSON_ADD_LIST_STRING("%u", ml2->unique_id);
+		}
+		g_list_free(k);
 
-			snprintf(tmp, sizeof(tmp), "sfd-%u", sfd->unique_id);
-			inner = parser->dict_add_dict_dup(root, tmp);
+		snprintf(tmp, sizeof(tmp), "tag_aliases-%u", ml->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		for (__auto_type alias = ml->tag_aliases.head; alias; alias = alias->next)
+			JSON_ADD_LIST_STRING(STR_FORMAT, STR_FMT(alias->data));
+	} // --- for monologues.head
 
-			{
-				JSON_SET_SIMPLE_CSTR("pref_family", sfd->local_intf->logical->preferred_family->rfc_name);
-				JSON_SET_SIMPLE("localport","%u", sfd->socket.local.port);
-				JSON_SET_SIMPLE("fd", "%i", sfd->socket.fd);
-				JSON_SET_SIMPLE_STR("logical_intf", &sfd->local_intf->logical->name);
-				JSON_SET_SIMPLE("local_intf_uid","%u", sfd->local_intf->unique_id);
-				JSON_SET_SIMPLE("stream","%u", sfd->stream->unique_id);
+	IQUEUE_FOREACH(&c->medias, media) {
+		/* store media subscriptions */
+		snprintf(tmp, sizeof(tmp), "media-subscriptions-%u", media->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
 
-				json_update_crypto_params(parser, inner, "", &sfd->crypto.params);
-			}
+		IQUEUE_FOREACH(&media->media_subscriptions, ms) {
+			JSON_ADD_LIST_STRING("%u/%u/%u/%u/%u",
+					ms->media->unique_id,
+					ms->attrs.offer_answer,
+					ms->attrs.rtcp_only,
+					ms->attrs.egress,
+					ms->attrs.inject);
+		}
 
-		} // --- for
+		redis_encode_media_basic(media, parser, root);
 
-		for (__auto_type l = c->streams.head; l; l = l->next) {
-			struct packet_stream *ps = l->data;
+		snprintf(tmp, sizeof(tmp), "streams-%u", media->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		IQUEUE_FOREACH(&media->streams, ps)
+			JSON_ADD_LIST_STRING("%u", ps->unique_id);
 
-			if (!ps->media || !ml_in_scope(scope, ps->media->monologue))
-				continue;
+		snprintf(tmp, sizeof(tmp), "maps-%u", media->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		IQUEUE_FOREACH(&media->endpoint_maps, ep)
+			JSON_ADD_LIST_STRING("%u", ep->unique_id);
 
-			LOCK(&ps->lock);
+	} // --- for medias.head
 
-			snprintf(tmp, sizeof(tmp), "stream-%u", ps->unique_id);
-			inner = parser->dict_add_dict_dup(root, tmp);
+	IQUEUE_FOREACH(&c->endpoint_maps, ep) {
+		snprintf(tmp, sizeof(tmp), "map-%u", ep->unique_id);
+		inner = parser->dict_add_dict_dup(root, tmp);
 
-			{
-				JSON_SET_SIMPLE("media","%u",ps->media->unique_id);
-				JSON_SET_SIMPLE("sfd","%u",ps->selected_sfd ? ps->selected_sfd->unique_id : -1);
-				JSON_SET_SIMPLE("rtcp_sibling","%u",ps->rtcp_sibling ? ps->rtcp_sibling->unique_id : -1);
-				JSON_SET_SIMPLE("ps_flags", "%" PRIu64, atomic64_get_na(&ps->ps_flags));
-				JSON_SET_SIMPLE("component","%u",ps->component);
-				JSON_SET_SIMPLE_CSTR("endpoint",endpoint_print_buf(&ps->endpoint));
-				JSON_SET_SIMPLE_CSTR("advertised_endpoint",endpoint_print_buf(&ps->advertised_endpoint));
-				if (scope) {
-					JSON_SET_SIMPLE_CSTR("learned_endpoint",
-							ps->learned_endpoint.address.family
-							? endpoint_print_buf(&ps->learned_endpoint) : "");
-					JSON_SET_SIMPLE_CSTR("last_local_endpoint",
-							ps->last_local_endpoint.address.family
-							? endpoint_print_buf(&ps->last_local_endpoint) : "");
-					JSON_SET_SIMPLE("ep_detect_signal", "%" PRId64, ps->ep_detect_signal);
-					JSON_SET_SIMPLE("el_flags", "%u", ps->el_flags);
-					json_update_detected_endpoints(parser, inner, ps);
-				}
-				JSON_SET_SIMPLE("stats-packets","%" PRIu64, atomic64_get_na(&ps->stats_in->packets));
-				JSON_SET_SIMPLE("stats-bytes","%" PRIu64, atomic64_get_na(&ps->stats_in->bytes));
-				JSON_SET_SIMPLE("stats-errors","%" PRIu64, atomic64_get_na(&ps->stats_in->errors));
+		{
+			JSON_SET_SIMPLE("wildcard","%i", ep->wildcard);
+			JSON_SET_SIMPLE("num_ports","%u", ep->num_ports);
+			JSON_SET_SIMPLE_CSTR("intf_preferred_family", ep->logical_intf->preferred_family->rfc_name);
+			JSON_SET_SIMPLE_STR("logical_intf", &ep->logical_intf->name);
+			JSON_SET_SIMPLE_CSTR("endpoint", endpoint_print_buf(&ep->endpoint));
 
-				json_update_crypto_params(parser, inner, "", &ps->crypto.params);
-			}
+		}
 
-			snprintf(tmp, sizeof(tmp), "stream_sfds-%u", ps->unique_id);
-			inner = parser->dict_add_list_dup(root, tmp);
-			for (__auto_type k = ps->sfds.head; k; k = k->next) {
-				stream_fd *sfd = k->data;
+		snprintf(tmp, sizeof(tmp), "map_sfds-%u", ep->unique_id);
+		inner = parser->dict_add_list_dup(root, tmp);
+		for (__auto_type m = ep->intf_sfds.head; m; m = m->next) {
+			struct sfd_intf_list *il = m->data;
+			JSON_ADD_LIST_STRING("loc-%u", il->local_intf->unique_id);
+			for (__auto_type n = il->list.head; n; n = n->next) {
+				stream_fd *sfd = n->data;
 				JSON_ADD_LIST_STRING("%u", sfd->unique_id);
 			}
-
-			if (!scope) {
-				snprintf(tmp, sizeof(tmp), "rtp_sinks-%u", ps->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-				for (__auto_type k = ps->rtp_sinks.head; k; k = k->next) {
-					struct sink_handler *sh = k->data;
-					struct packet_stream *sink = sh->sink;
-					JSON_ADD_LIST_STRING("%u", sink->unique_id);
-				}
-			}
-
-			if (!scope) {
-				snprintf(tmp, sizeof(tmp), "rtcp_sinks-%u", ps->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-				for (__auto_type k = ps->rtcp_sinks.head; k; k = k->next) {
-					struct sink_handler *sh = k->data;
-					struct packet_stream *sink = sh->sink;
-					JSON_ADD_LIST_STRING("%u", sink->unique_id);
-				}
-			}
-		} // --- for streams.head
-
-		for (__auto_type l = c->monologues.head; l; l = l->next) {
-			struct call_monologue *ml = l->data;
-
-			if (!ml_in_scope(scope, ml))
-				continue;
-
-			snprintf(tmp, sizeof(tmp), "tag-%u", ml->unique_id);
-			inner = parser->dict_add_dict_dup(root, tmp);
-
-			{
-
-				JSON_SET_SIMPLE("created", "%" PRId64, ml->created_us);
-				JSON_SET_SIMPLE("deleted", "%" PRId64, ml->deleted_us);
-				JSON_SET_SIMPLE("block_dtmf", "%i", ml->block_dtmf);
-				JSON_SET_SIMPLE("ml_flags", "%" PRIu64, atomic64_get_na(&ml->ml_flags));
-				JSON_SET_SIMPLE_CSTR("desired_family", ml->desired_family ? ml->desired_family->rfc_name : "");
-				if (ml->logical_intf)
-					JSON_SET_SIMPLE_STR("logical_intf", &ml->logical_intf->name);
-
-				if (ml->tag.s)
-					JSON_SET_SIMPLE_STR("tag", &ml->tag);
-				if (ml->call_id.s)
-					JSON_SET_SIMPLE_STR("call_id", &ml->tag);
-				if (ml->viabranch.s)
-					JSON_SET_SIMPLE_STR("via-branch", &ml->viabranch);
-				if (ml->label.s)
-					JSON_SET_SIMPLE_STR("label", &ml->label);
-				if (ml->metadata.s)
-					JSON_SET_SIMPLE_STR("metadata", &ml->metadata);
-
-				JSON_SET_SIMPLE_STR("sdp_session_name", &ml->sdp_session_name);
-				JSON_SET_SIMPLE_STR("sdp_session_timing", &ml->sdp_session_timing);
-
-				if (ml->sdp_orig_in.parsed) {
-					JSON_SET_SIMPLE_STR("sdp_orig_username", &ml->sdp_orig_in.username);
-					JSON_SET_SIMPLE_STR("sdp_orig_session_id", &ml->sdp_orig_in.session_id);
-					JSON_SET_SIMPLE("sdp_orig_version_num", "%llu", ml->sdp_orig_in.version_num);
-					JSON_SET_SIMPLE("sdp_orig_parsed", "%u", ml->sdp_orig_in.parsed);
-					JSON_SET_SIMPLE_STR("sdp_orig_address_network_type", &ml->sdp_orig_in.address.network_type);
-					JSON_SET_SIMPLE_STR("sdp_orig_address_address_type", &ml->sdp_orig_in.address.address_type);
-					JSON_SET_SIMPLE_STR("sdp_orig_address_address", &ml->sdp_orig_in.address.address);
-				}
-				if (ml->sdp_orig_out.parsed) {
-					JSON_SET_SIMPLE_STR("last_sdp_orig_username", &ml->sdp_orig_out.username);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_session_id", &ml->sdp_orig_out.session_id);
-					JSON_SET_SIMPLE("last_sdp_orig_version_num", "%llu", ml->sdp_orig_out.version_num);
-					JSON_SET_SIMPLE("last_sdp_orig_parsed", "%u", ml->sdp_orig_out.parsed);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_address_network_type", &ml->sdp_orig_out.address.network_type);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_address_address_type", &ml->sdp_orig_out.address.address_type);
-					JSON_SET_SIMPLE_STR("last_sdp_orig_address_address", &ml->sdp_orig_out.address.address);
-				}
-
-				if (ml->sdp_session_bandwidth.as >= 0)
-					JSON_SET_SIMPLE("sdp_session_as", "%ld", ml->sdp_session_bandwidth.as);
-				if (ml->sdp_session_bandwidth.ct >= 0)
-					JSON_SET_SIMPLE("sdp_session_ct", "%ld", ml->sdp_session_bandwidth.ct);
-				if (ml->sdp_session_bandwidth.rr >= 0)
-					JSON_SET_SIMPLE("sdp_session_rr", "%ld", ml->sdp_session_bandwidth.rr);
-				if (ml->sdp_session_bandwidth.rs >= 0)
-					JSON_SET_SIMPLE("sdp_session_rs", "%ld", ml->sdp_session_bandwidth.rs);
-				if (ml->sdp_session_bandwidth.tias >= 0)
-					JSON_SET_SIMPLE("sdp_session_tias", "%ld", ml->sdp_session_bandwidth.tias);
-				if (ml->last_out_sdp && ml->last_out_sdp->len)
-					JSON_SET_SIMPLE_LEN("last_out_sdp", ml->last_out_sdp->len,
-							ml->last_out_sdp->str);
-			}
-
-			GList *k = g_hash_table_get_values(ml->associated_tags);
-			if (!scope) {
-				snprintf(tmp, sizeof(tmp), "associated_tags-%u", ml->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-				for (GList *m = k; m; m = m->next) {
-					struct call_monologue *ml2 = m->data;
-					JSON_ADD_LIST_STRING("%u", ml2->unique_id);
-				}
-			}
-
-			g_list_free(k);
-
-			if (!scope) {
-				snprintf(tmp, sizeof(tmp), "tag_aliases-%u", ml->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-				for (__auto_type alias = ml->tag_aliases.head; alias; alias = alias->next)
-					JSON_ADD_LIST_STRING(STR_FORMAT, STR_FMT(alias->data));
-			}
-
-			snprintf(tmp, sizeof(tmp), "medias-%u", ml->unique_id);
-			inner = parser->dict_add_list_dup(root, tmp);
-			for (unsigned int j = 0; j < ml->medias->len; j++) {
-				struct call_media *media = ml->medias->pdata[j];
-				JSON_ADD_LIST_STRING("%u", media ? media->unique_id : -1);
-			}
-		} // --- for monologues.head
-
-		for (__auto_type l = c->medias.head; l; l = l->next) {
-			struct call_media *media = l->data;
-
-			if (!media || !ml_in_scope(scope, media->monologue))
-				continue;
-
-			if (!scope) {
-				/* store media subscriptions */
-				snprintf(tmp, sizeof(tmp), "media-subscriptions-%u", media->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-
-				IQUEUE_FOREACH(&media->media_subscriptions, ms) {
-					JSON_ADD_LIST_STRING("%u/%u/%u/%u/%u",
-							ms->media->unique_id,
-							ms->attrs.offer_answer,
-							ms->attrs.rtcp_only,
-							ms->attrs.egress,
-							ms->attrs.inject);
-				}
-			}
-
-			snprintf(tmp, sizeof(tmp), "media-%u", media->unique_id);
-			inner = parser->dict_add_dict_dup(root, tmp);
-
-			{
-				JSON_SET_SIMPLE("tag","%u", media->monologue->unique_id);
-				JSON_SET_SIMPLE("index","%u", media->index);
-				JSON_SET_SIMPLE_STR("type", &media->type);
-				if (media->format_str.s)
-					JSON_SET_SIMPLE_STR("format_str", &media->format_str);
-				if (media->media_id.s)
-					JSON_SET_SIMPLE_STR("media_id", &media->media_id);
-				JSON_SET_SIMPLE_CSTR("protocol", media->protocol ? media->protocol->name : "");
-				JSON_SET_SIMPLE_CSTR("desired_family", media->desired_family ? media->desired_family->rfc_name : "");
-				if (media->logical_intf)
-					JSON_SET_SIMPLE_STR("logical_intf", &media->logical_intf->name);
-				JSON_SET_SIMPLE("ptime","%i", media->ptime);
-				JSON_SET_SIMPLE("maxptime","%i", media->maxptime);
-				JSON_SET_SIMPLE("media_flags", "%" PRIu64, atomic64_get_na(&media->media_flags));
-
-				if (media->sdp_media_bandwidth.as >= 0)
-					JSON_SET_SIMPLE("bandwidth_as","%ld", media->sdp_media_bandwidth.as);
-				if (media->sdp_media_bandwidth.rr >= 0)
-					JSON_SET_SIMPLE("bandwidth_rr","%ld", media->sdp_media_bandwidth.rr);
-				if (media->sdp_media_bandwidth.rs >= 0)
-					JSON_SET_SIMPLE("bandwidth_rs","%ld", media->sdp_media_bandwidth.rs);
-				if (media->sdp_media_bandwidth.ct >= 0)
-					JSON_SET_SIMPLE("bandwidth_ct","%ld", media->sdp_media_bandwidth.ct);
-				if (media->sdp_media_bandwidth.tias >= 0)
-					JSON_SET_SIMPLE("bandwidth_tias","%ld", media->sdp_media_bandwidth.tias);
-
-				if (scope) {
-					if (media->tls_id.s)
-						JSON_SET_SIMPLE_STR("tls_id", &media->tls_id);
-					if (media->fp_hash_func)
-						JSON_SET_SIMPLE_CSTR("preferred_hash_func",
-								media->fp_hash_func->name);
-					if (media->endpoint_map)
-						JSON_SET_SIMPLE("endpoint_map", "%u",
-								media->endpoint_map->unique_id);
-
-					unsigned int num_cands = 0;
-					for (__auto_type m = media->ice_candidates.head; m; m = m->next)
-						num_cands++;
-					JSON_SET_SIMPLE("num_ice_candidates", "%u", num_cands);
-					JSON_SET_SIMPLE("had_ice", "%i", media->ice_agent ? 1 : 0);
-					if (media->ice_agent) {
-						JSON_SET_SIMPLE_STR("ice_ufrag_local", &media->ice_agent->ufrag[0]);
-						JSON_SET_SIMPLE_STR("ice_ufrag_remote", &media->ice_agent->ufrag[1]);
-						JSON_SET_SIMPLE_STR("ice_pwd_local", &media->ice_agent->pwd[0]);
-						JSON_SET_SIMPLE_STR("ice_pwd_remote", &media->ice_agent->pwd[1]);
-					}
-				}
-
-				redis_encode_sdes_params(parser, inner, "sdes_in", &media->sdes_in);
-				redis_encode_sdes_params(parser, inner, "sdes_out", &media->sdes_out);
-				redis_encode_dtls_fingerprint(parser, inner, &media->fingerprint);
-			}
-
-			if (scope) {
-				unsigned int ci = 0;
-				for (__auto_type m = media->ice_candidates.head; m; m = m->next, ci++) {
-					const struct ice_candidate *cand = m->data;
-					snprintf(tmp, sizeof(tmp), "ice_candidate-%u-%u", media->unique_id, ci);
-					inner = parser->dict_add_dict_dup(root, tmp);
-					JSON_SET_SIMPLE_STR("foundation", &cand->foundation);
-					JSON_SET_SIMPLE("component", "%lu", (unsigned long) cand->component_id);
-					JSON_SET_SIMPLE_CSTR("transport",
-							cand->transport ? cand->transport->name : "");
-					JSON_SET_SIMPLE("priority", "%lu", (unsigned long) cand->priority);
-					JSON_SET_SIMPLE("type", "%u", cand->type);
-					JSON_SET_SIMPLE_STR("ufrag", &cand->ufrag);
-					JSON_SET_SIMPLE_CSTR("endpoint",
-							cand->endpoint.address.family
-							? endpoint_print_buf(&cand->endpoint) : "");
-					JSON_SET_SIMPLE_CSTR("related",
-							cand->related.address.family
-							? endpoint_print_buf(&cand->related) : "");
-				}
-			}
-
-			if (!scope) {
-				snprintf(tmp, sizeof(tmp), "streams-%u", media->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-				for (__auto_type m = media->streams.head; m; m = m->next) {
-					struct packet_stream *ps = m->data;
-					JSON_ADD_LIST_STRING("%u", ps->unique_id);
-				}
-			}
-
-			if (!scope) {
-				snprintf(tmp, sizeof(tmp), "maps-%u", media->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-				for (__auto_type m = media->endpoint_maps.head; m; m = m->next) {
-					struct endpoint_map *ep = m->data;
-					JSON_ADD_LIST_STRING("%u", ep->unique_id);
-				}
-			}
-
-			snprintf(tmp, sizeof(tmp), "payload_types-%u", media->unique_id);
-			inner = parser->dict_add_list_dup(root, tmp);
-			redis_encode_codec_store(parser, inner, &media->codecs);
-
-			if (scope) {
-				snprintf(tmp, sizeof(tmp), "offered_payload_types-%u", media->unique_id);
-				inner = parser->dict_add_list_dup(root, tmp);
-				redis_encode_codec_store(parser, inner, &media->offered_codecs);
-			}
-
-			// SSRC table dump
-			// XXX needs fixing
-			LOCK(&media->ssrc_hash_in.lock);
-			snprintf(tmp, sizeof(tmp), "ssrc_table-%u", media->unique_id);
-			parser_arg list = parser->dict_add_list_dup(root, tmp);
-			for (GList *m = media->ssrc_hash_in.nq.head; m; m = m->next) {
-				struct ssrc_entry_call *se = m->data;
-				inner = parser->list_add_dict(list);
-
-				JSON_SET_SIMPLE("ssrc", "%" PRIu32, se->h.ssrc);
-				// XXX use function for in/out
-				JSON_SET_SIMPLE("in_srtp_index", "%u", atomic_get_na(&se->stats->ext_seq));
-				JSON_SET_SIMPLE("in_srtcp_index", "%u", atomic_get_na(&se->stats->rtcp_seq));
-				JSON_SET_SIMPLE("in_payload_type", "%i", se->tracker.most[0]);
-				//JSON_SET_SIMPLE("out_srtp_index", "%u", atomic_get_na(&se->output_ctx.stats->ext_seq));
-				//JSON_SET_SIMPLE("out_srtcp_index", "%u", atomic_get_na(&se->output_ctx.stats->rtcp_seq));
-				//JSON_SET_SIMPLE("out_payload_type", "%i", se->output_ctx.tracker.most[0]);
-				// XXX add rest of info
-			}
-		} // --- for medias.head
-
-		for (__auto_type l = scope ? NULL : c->endpoint_maps.head; l; l = l->next) {
-			struct endpoint_map *ep = l->data;
-
-			snprintf(tmp, sizeof(tmp), "map-%u", ep->unique_id);
-			inner = parser->dict_add_dict_dup(root, tmp);
-
-			{
-				JSON_SET_SIMPLE("wildcard","%i", ep->wildcard);
-				JSON_SET_SIMPLE("num_ports","%u", ep->num_ports);
-				JSON_SET_SIMPLE_CSTR("intf_preferred_family", ep->logical_intf->preferred_family->rfc_name);
-				JSON_SET_SIMPLE_STR("logical_intf", &ep->logical_intf->name);
-				JSON_SET_SIMPLE_CSTR("endpoint", endpoint_print_buf(&ep->endpoint));
-
-			}
-
-			snprintf(tmp, sizeof(tmp), "map_sfds-%u", ep->unique_id);
-			inner = parser->dict_add_list_dup(root, tmp);
-			for (__auto_type m = ep->intf_sfds.head; m; m = m->next) {
-				struct sfd_intf_list *il = m->data;
-				JSON_ADD_LIST_STRING("loc-%u", il->local_intf->unique_id);
-				for (__auto_type n = il->list.head; n; n = n->next) {
-					stream_fd *sfd = n->data;
-					JSON_ADD_LIST_STRING("%u", sfd->unique_id);
-				}
-			}
-		} // --- for c->endpoint_maps.head
-
+		}
 	}
 
 	return parser->collapse(ctx, root, to_free);
@@ -3103,20 +3121,19 @@ static str redis_encode_json(ng_parser_ctx_t *ctx, call_t *c, void **to_free,
 
 
 str redis_snapshot_encode(call_t *c, struct call_monologue *ml) {
-	struct call_monologue *scope[2] = { ml, ml };
 	ng_parser_ctx_t ctx;
-	bencode_buffer_t bbuf;
+	arena_t bbuf;
 	// never leaves the daemon, so the format is ours to pick
 	ng_parser_native.init(&ctx, &bbuf);
 
 	void *to_free = NULL;
-	str encoded = redis_encode_json(&ctx, c, &to_free, scope);
+	str encoded = redis_encode_json_ml(&ctx, c, &to_free, ml);
 	str out = STR_NULL;
 	if (encoded.len)
 		out = str_dup_str(&encoded);
 
 	g_free(to_free);
-	bencode_buffer_free(ctx.buffer);
+	arena_free(ctx.buffer);
 	return out;
 }
 
@@ -3134,8 +3151,7 @@ static stream_fd *snapshot_find_sfd(call_t *c, unsigned int id) {
 }
 
 static struct endpoint_map *snapshot_find_map(call_t *c, unsigned int id) {
-	for (__auto_type l = c->endpoint_maps.head; l; l = l->next) {
-		struct endpoint_map *map = l->data;
+	IQUEUE_FOREACH(&c->endpoint_maps, map) {
 		if (map->unique_id == id)
 			return map;
 	}
@@ -3349,8 +3365,8 @@ static void snapshot_apply_media(call_t *c, struct call_media *m,
 
 	// assigned unconditionally: these are written only when set, so an absent key
 	// means the rejected offer put it there and it has to go
-	m->protocol_str = !redis_hash_get_str(&s, rh, "protocol") ? call_str_cpy(&s) : STR_NULL;
-	m->tls_id = !redis_hash_get_str(&s, rh, "tls_id") ? call_str_cpy(&s) : STR_NULL;
+	memory_arena_str_cpy_free(&m->protocol_str, !redis_hash_get_str(&s, rh, "protocol") ? &s : NULL);
+	memory_arena_str_cpy_free(&m->tls_id, !redis_hash_get_str(&s, rh, "tls_id") ? &s : NULL);
 	m->fp_hash_func = !redis_hash_get_str(&s, rh, "preferred_hash_func")
 			? dtls_find_hash_func(&s) : NULL;
 	m->endpoint_map = !redis_hash_get_int64_t(&iv, rh, "endpoint_map")
@@ -3438,8 +3454,7 @@ static void snapshot_apply_streams(call_t *c, struct call_monologue *ml, parser_
 		struct call_media *m = ml->medias->pdata[j];
 		if (!m)
 			continue;
-		for (__auto_type l = m->streams.head; l; l = l->next) {
-			struct packet_stream *ps = l->data;
+		IQUEUE_FOREACH(&m->streams, ps) {
 			struct redis_hash rh;
 			if (json_get_hash(&rh, "stream", ps->unique_id, root))
 				continue;
@@ -3537,11 +3552,11 @@ void redis_update_onekey(call_t *c, struct redis *r) {
 	}
 
 	ng_parser_ctx_t ctx;
-	bencode_buffer_t bbuf;
+	arena_t bbuf;
 	redis_format_parsers[rtpe_config.redis_format]->init(&ctx, &bbuf);
 
 	void *to_free = NULL;
-	str result = redis_encode_json(&ctx, c, &to_free, NULL);
+	str result = redis_encode_json(&ctx, c, &to_free);
 	if (!result.len)
 		goto err;
 
@@ -3552,7 +3567,7 @@ void redis_update_onekey(call_t *c, struct redis *r) {
 	rwlock_unlock_r(&c->master_lock);
 
 	g_free(to_free);
-	bencode_buffer_free(ctx.buffer);
+	arena_free(ctx.buffer);
 
 	return;
 err:

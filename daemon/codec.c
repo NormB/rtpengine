@@ -239,8 +239,7 @@ struct transcode_packet {
 	unsigned long ts;
 	str *payload;
 	struct codec_handler *handler;
-	bool marker:1,
-	     bypass_seq:1;
+	bool bypass_seq;
 	tc_code (*packet_func)(struct codec_ssrc_handler *, struct codec_ssrc_handler *, struct transcode_packet *,
 			struct media_packet *);
 	int (*dup_func)(struct codec_ssrc_handler *, struct codec_ssrc_handler *, struct transcode_packet *,
@@ -429,6 +428,9 @@ static void __transform_handler_destroy(struct transform_handler *tfh) {
 		if (!ret || !(result = bencode_dictionary_get_str(ret, "result")).len || str_cmp(&result, "ok"))
 			ilog(LOG_WARN, "Failed to delete remote 'transform' session");
 	}
+
+	memory_arena_free_lw(tfh->call_id.s);
+	memory_arena_free_lw(tfh->tag.s);
 }
 
 static void __handler_shutdown(struct codec_handler *handler) {
@@ -676,7 +678,7 @@ static const char *__make_transform_handler(struct codec_handler *handler) {
 	g_string_append(req, "e6:outputd5:codec");
 	append_pt(req, &handler->dest_pt);
 
-	__auto_type ps = tfh->transform_media->streams.head->data;
+	__auto_type ps = tfh->transform_media->streams.head;
 	__auto_type sock = &ps->selected_sfd->socket;
 
 	g_string_append(req, "eee11:destinationd");
@@ -711,12 +713,12 @@ static const char *__make_transform_handler(struct codec_handler *handler) {
 	str s = bencode_dictionary_get_str(ret, "call-id");
 	if (!s.len)
 		return "'transform' response didn't contain 'call-id'";
-	tfh->call_id = call_str_cpy(&s);
+	memory_arena_str_cpy_free(&tfh->call_id, &s);
 
 	s = bencode_dictionary_get_str(ret, "from-tag");
 	if (!s.len)
 		return "'transform' response didn't contain 'from-tag'";
-	tfh->tag = call_str_cpy(&s);
+	memory_arena_str_cpy_free(&tfh->tag, &s);
 
 	__auto_type remote_media = bencode_dictionary_get_expect(ret, "media", BENCODE_LIST);
 	if (!remote_media)
@@ -744,7 +746,7 @@ static const char *__make_transform_handler(struct codec_handler *handler) {
 		return "'transform' response media contained invalid 'address'";
 	tfh->remote.port = port;
 
-	ps = tfh->transform_media->streams.head->data;
+	ps = tfh->transform_media->streams.head;
 	ps->advertised_endpoint = ps->endpoint = tfh->remote;
 	PS_SET(ps, FILLED);
 
@@ -1423,6 +1425,26 @@ static GTree *codec_make_prefs_tree(rtp_payload_type *pt, struct codec_store *cs
 	return ret;
 }
 
+static bool codec_update_audio_player_flags(struct call_media *sink, const sdp_ng_flags *flags) {
+	bool explicit_player = MEDIA_ISSET(sink, AUDIO_PLAYER) && !MEDIA_ISSET(sink, AUDIO_PLAYER_IMPLICIT);
+	MEDIA_CLEAR(sink, AUDIO_PLAYER_IMPLICIT);
+	if (explicit_player)
+		return true;
+	MEDIA_CLEAR(sink, AUDIO_PLAYER);
+
+	bool playing = media_player_is_active(sink);
+	if (media_has_inject_subscriptions(sink)
+			|| (playing && audio_player_is_active(sink))
+			|| (rtpe_config.use_audio_player == UAP_PLAY_MEDIA
+				&& ((flags && flags->opmode == OP_PLAY_MEDIA) || playing)))
+	{
+		MEDIA_SET(sink, AUDIO_PLAYER_IMPLICIT);
+		return true;
+	}
+	return false;
+}
+
+
 /**
  * receiver - media / sink - other_media
  * call must be locked in W
@@ -1435,6 +1457,8 @@ void __codec_handlers_update(struct call_media *source, struct call_media *sink,
 
 	if (!source_ml || !sink_ml)
 		return;
+
+	bool use_audio_player = codec_update_audio_player_flags(sink, a.flags);
 
 	/* required for updating the transcoding attrs of subscriber */
 	struct media_subscription *ms = call_get_media_subscription(source->media_subscribers_ht, sink);
@@ -1492,21 +1516,6 @@ void __codec_handlers_update(struct call_media *source, struct call_media *sink,
 	source->rtcp_handler = NULL;
 	source->dtmf_count = 0;
 	GSList *passthrough_handlers = NULL;
-
-	// default choice of audio player usage is based on whether it was in use previously,
-	// overridden by signalling flags, overridden by global option
-	bool use_audio_player = !!MEDIA_ISSET(sink, AUDIO_PLAYER) && !MEDIA_ISSET(sink, AUDIO_PLAYER_IMPLICIT);
-
-	bool implicit_audio_player = false;
-	MEDIA_CLEAR(sink, AUDIO_PLAYER_IMPLICIT);
-
-	if (rtpe_config.use_audio_player == UAP_PLAY_MEDIA) {
-		// check for implicitly enabled player
-		if ((a.flags && a.flags->opmode == OP_PLAY_MEDIA) || (media_player_is_active(sink))) {
-			use_audio_player = true;
-			implicit_audio_player = true;
-		}
-	}
 
 	// first gather info about what we can send
 	g_auto(supp_ht) supplemental_sinks_store = {0};
@@ -1805,12 +1814,12 @@ sink_pt_fixed:;
 
 transcode:
 		// enable audio player if not explicitly disabled
-		if ((rtpe_config.use_audio_player == UAP_TRANSCODING
+		if (!use_audio_player && ((rtpe_config.use_audio_player == UAP_TRANSCODING
 					&& (!a.flags || a.flags->audio_player != AP_OFF))
-				|| (a.flags && a.flags->audio_player == AP_TRANSCODING))
+				|| (a.flags && a.flags->audio_player == AP_TRANSCODING)))
 		{
 			use_audio_player = true;
-			implicit_audio_player = true;
+			MEDIA_SET(sink, AUDIO_PLAYER_IMPLICIT);
 		}
 
 		if (use_audio_player) {
@@ -1862,8 +1871,6 @@ next:
 		MEDIA_CLEAR(sink, AUDIO_PLAYER);
 		audio_player_stop(sink);
 	}
-	else if (implicit_audio_player)
-		MEDIA_SET(sink, AUDIO_PLAYER_IMPLICIT);
 
 	if (is_transcoding) {
 		if (a.reset_transcoding && ms)
@@ -2210,6 +2217,13 @@ static int handler_func_passthrough(struct codec_handler *h, struct media_packet
 
 	ML_CLEAR(mp->media->monologue, DTMF_INJECTION_ACTIVE);
 
+	// substitute a fixed egress SSRC. done here rather than in the SSRC
+	// passthrough handler as that one is only built with transcoding support.
+	if (mp->rtp && mp->media_out->fixed_egress_ssrc && mp->ssrc_out) {
+		mp->rtp->ssrc = htonl(mp->ssrc_out->h.ssrc);
+		mp->rtp->seq_num = htons(ntohs(mp->rtp->seq_num) + mp->ssrc_out->seq_diff);
+	}
+
 	__buffer_delay_raw(h->delay_buffer, h, codec_add_raw_packet, mp, h->source_pt.clock_rate);
 
 	return 0;
@@ -2258,7 +2272,7 @@ static int __handler_func_sequencer(struct media_packet *mp, struct transcode_pa
 	packet->payload = str_dup(&mp->payload);
 	uint32_t packet_ts = ntohl(mp->rtp->timestamp);
 	packet->ts = packet_ts;
-	packet->marker = (mp->rtp->m_pt & 0x80) ? true : false;
+	packet->p.marker = (mp->rtp->m_pt & 0x80) ? true : false;
 
 	atomic64_inc_na(&ssrc_in->stats->packets);
 	atomic64_add_na(&ssrc_in->stats->bytes, mp->payload.len);
@@ -2293,7 +2307,8 @@ static int __handler_func_sequencer(struct media_packet *mp, struct transcode_pa
 		seq = g_hash_table_lookup(ssrc_in->sequencers, mp->media_out);
 	if (!seq) {
 		seq = g_new0(__typeof(*seq), 1);
-		packet_sequencer_init(seq, (void (*)(seq_packet_t *)) __transcode_packet_free);
+		packet_sequencer_init(seq, (void (*)(seq_packet_t *)) __transcode_packet_free,
+				h->source_pt.codec_def->media_type == MT_VIDEO ? true : false);
 		g_hash_table_insert(ssrc_in->sequencers, mp->media_out, seq);
 		ssrc_in->media_cache = mp->media_out;
 		ssrc_in->sequencer_cache = seq;
@@ -2656,11 +2671,11 @@ skip:
 	memcpy(buf + sizeof(struct rtp_header), packet->payload->s, packet->payload->len);
 	if (packet->bypass_seq) // inject original seq
 		codec_output_rtp(mp, &ch->csch, packet->handler ? : h, buf, packet->payload->len, packet->ts,
-				(struct rtp_markers) { .marker = packet->marker },
+				(struct rtp_markers) { .marker = packet->p.marker },
 				packet->p.seq, -1, payload_type, ts_delay);
 	else // use our own sequencing
 		input_ch->codec_output_rtp_seq(mp, &ch->csch, packet->handler ? : h, buf, packet->payload->len, packet->ts,
-				(struct rtp_markers) { .marker = packet->marker },
+				(struct rtp_markers) { .marker = packet->p.marker },
 				payload_type, ts_delay);
 	mp->ssrc_out->seq_diff++;
 
@@ -2783,7 +2798,7 @@ static tc_code packet_dtmf(struct codec_ssrc_handler *ch, struct codec_ssrc_hand
 				dup->bypass_seq = false;
 				dup->ts = ts;
 				if (is_dtmf == 1)
-					dup->marker = true;
+					dup->p.marker = true;
 
 				tc_code ret = TCC_OK;
 
@@ -2960,7 +2975,7 @@ bool codec_parse_payload_type(rtp_payload_type *pt, const str *codec_str) {
 }
 
 rtp_payload_type *codec_make_payload_type(const str *codec_str, enum media_type type) {
-	__auto_type pt = memory_arena_alloc0(rtp_payload_type);
+	__auto_type pt = memory_arena_alloc0_lw(rtp_payload_type);
 
 	if (!codec_parse_payload_type(pt, codec_str)) {
 		payload_type_free(pt);
@@ -3033,17 +3048,17 @@ void codec_init_payload_type(rtp_payload_type *pt, enum media_type type) {
 				pt->clock_rate);
 
 	// allocate strings
-	pt->encoding = call_str_cpy(&pt->encoding);
-	pt->encoding_with_params = call_str_cpy_c(full_encoding);
-	pt->encoding_with_full_params = call_str_cpy_c(full_full_encoding);
-	pt->encoding_parameters = call_str_cpy_c(params);
-	pt->format_parameters = call_str_cpy(&pt->format_parameters);
-	pt->codec_opts = call_str_cpy(&pt->codec_opts);
+	pt->encoding = memory_arena_str_cpy_lw(&pt->encoding);
+	pt->encoding_with_params = memory_arena_str_cpy_c_lw(full_encoding);
+	pt->encoding_with_full_params = memory_arena_str_cpy_c_lw(full_full_encoding);
+	pt->encoding_parameters = memory_arena_str_cpy_c_lw(params);
+	pt->format_parameters = memory_arena_str_cpy_lw(&pt->format_parameters);
+	pt->codec_opts = memory_arena_str_cpy_lw(&pt->codec_opts);
 
 	// allocate everything from the rtcp-fb list
-	for (GList *l = pt->rtcp_fb.head; l; l = l->next) {
+	for (__auto_type l = pt->rtcp_fb.head; l; l = l->next) {
 		str *fb = l->data;
-		l->data = call_str_dup(fb);
+		l->data = memory_arena_str_dup_lw(fb);
 	}
 }
 
@@ -4870,7 +4885,7 @@ static tc_code __rtp_decode_direct(struct codec_ssrc_handler *ch, struct codec_s
 					packet->payload,
 					packet->ts,
 					&mp->ptime,
-					packet->marker,
+					packet->p.marker,
 					ch->handler->packet_decoded,
 					ch, mp);
 			code = ret == 0 ? TCC_OK : TCC_ERR;
@@ -4991,6 +5006,13 @@ void __codec_update_media_source_handlers(struct call_media *sink_media, struct 
 		__codec_handlers_update(source_media, sink_media, a);
 		__media_unconfirm(source_media, "updating codec source handlers");
 	}
+
+#ifdef WITH_TRANSCODING
+	if (!sink_media->media_subscriptions.head)
+		codec_update_audio_player_flags(sink_media, a.flags);
+	if (!MEDIA_ISSET(sink_media, AUDIO_PLAYER) && !MEDIA_ISSET(sink_media, AUDIO_PLAYER_IMPLICIT))
+		audio_player_stop(sink_media);
+#endif
 
 	__media_unconfirm(sink_media, "updating codec source handlers");
 }
@@ -5245,12 +5267,19 @@ static rtp_payload_type *codec_add_payload_type(const str *codec, struct call_me
 
 
 void payload_type_clear(rtp_payload_type *p) {
-	g_queue_clear(&p->rtcp_fb);
+	t_queue_clear_full(&p->rtcp_fb, memory_arena_str_dup_free_lw);
+	memory_arena_free_lw(p->encoding.s);
+	memory_arena_free_lw(p->encoding_with_params.s);
+	memory_arena_free_lw(p->encoding_with_full_params.s);
+	memory_arena_free_lw(p->encoding_parameters.s);
+	memory_arena_free_lw(p->format_parameters.s);
+	memory_arena_free_lw(p->codec_opts.s);
 	ZERO(*p);
 	p->payload_type = -1;
 }
 void payload_type_free(rtp_payload_type *p) {
 	payload_type_clear(p);
+	memory_arena_free_lw(p);
 }
 void payload_type_destroy(rtp_payload_type **p) {
 	if (*p)
@@ -5266,15 +5295,15 @@ static void rtp_payload_type_copy(rtp_payload_type *dst, const rtp_payload_type 
 	*dst = *src;
 
 	// make shallow copy of lists
-	g_queue_init(&dst->rtcp_fb);
-	g_queue_append(&dst->rtcp_fb, &src->rtcp_fb);
+	t_queue_init(&dst->rtcp_fb);
+	t_queue_append(&dst->rtcp_fb, &src->rtcp_fb);
 
 	// duplicate contents
 	codec_init_payload_type(dst, MT_UNKNOWN);
 }
 
 rtp_payload_type *rtp_payload_type_dup(const rtp_payload_type *pt) {
-	__auto_type pt_copy = memory_arena_alloc0(rtp_payload_type);
+	__auto_type pt_copy = memory_arena_alloc0_lw(rtp_payload_type);
 	rtp_payload_type_copy(pt_copy, pt);
 	return pt_copy;
 }
@@ -5327,8 +5356,10 @@ static int __codec_options_set1(call_t *call, rtp_payload_type *pt, const str *e
 	// match - apply options
 	if (pt_parsed->bitrate)
 		pt->bitrate = pt_parsed->bitrate;
-	if (!pt->codec_opts.len && pt_parsed->codec_opts.len)
-		pt->codec_opts = pt_parsed->codec_opts;
+	if (!pt->codec_opts.len && pt_parsed->codec_opts.len) {
+		memory_arena_free_lw(pt->codec_opts.s);
+		pt->codec_opts = memory_arena_str_cpy_lw(&pt_parsed->codec_opts);
+	}
 	payload_type_free(pt_parsed);
 	return 1;
 }
@@ -5839,7 +5870,7 @@ void __codec_store_populate(struct codec_store *dst, struct codec_store *src, st
 			pt->for_transcoding = orig_pt->for_transcoding;
 			pt->accepted = orig_pt->accepted;
 			pt->bitrate = orig_pt->bitrate;
-			pt->codec_opts = orig_pt->codec_opts;
+			pt->codec_opts = memory_arena_str_cpy_lw(&orig_pt->codec_opts);
 			if (pt->for_transcoding)
 				codec_touched(dst, pt);
 		}

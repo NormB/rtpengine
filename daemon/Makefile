@@ -87,12 +87,13 @@ SRCS := main.c kernel.c helpers.c control_tcp.c call.c control_udp.c redis.c \
 		crypto.c rtp.c call_interfaces.c dtls.c log.c cli.strhash.c graphite.c ice.c \
 		media_socket.c homer.c recording.c statistics.c cdr.c ssrc.c iptables.c tcp_listener.c \
 		codec.c load.c dtmf.c timerthread.c media_player.c jitter_buffer.c t38.c websocket.c \
-		mqtt.c janus.strhash.c audio_player.c arena.c ng_client.c call_flags.strhash.c
+		mqtt.c janus.strhash.c audio_player.c memory_arena.c ng_client.c call_flags.strhash.c
 ifneq ($(without_nftables),yes)
 SRCS += nftables.c
 endif
 LIBSRCS := loglib.c auxlib.c rtplib.c str.c socket.c streambuf.c ssllib.c dtmflib.c mix_buffer.c poller.c \
 		bufferpool.c bencode.c netfilter_api.c
+LIBSRCS += arena.c
 ifeq ($(with_transcoding),yes)
 LIBSRCS += codeclib.c resample.c cchain.c
 LIBSRCS += rescale.c

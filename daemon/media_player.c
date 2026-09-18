@@ -24,7 +24,7 @@
 #include "kernel.h"
 #include "bufferpool.h"
 #include "uring.h"
-#include "arena.h"
+#include "memory_arena.h"
 
 #define DEFAULT_AVIO_BUFSIZE 4096
 
@@ -757,7 +757,7 @@ static bool media_player_cache_get_entry(struct media_player *mp,
 	call_memory_arena_release();
 
 	entry = mp->cache_entry = obj_alloc0(struct media_player_cache_entry, __media_player_cache_entry_free);
-	memory_arena_init(&entry->arena);
+	arena_init(&entry->arena, g_malloc, g_free);
 	memory_arena = &entry->arena;
 
 	struct media_player_cache_index *ins_key = &entry->index;
@@ -922,7 +922,11 @@ static bool media_player_cache_entry_init(struct media_player *mp, const rtp_pay
 
 	// steal coder data
 	entry->coder = mp->coder;
+
+	rtp_payload_type src_pt_cpy = mp->coder.handler->source_pt;
+	rtp_payload_type dst_pt_cpy = mp->coder.handler->dest_pt;
 	ZERO(mp->coder);
+
 	mp->coder.duration = entry->coder.duration; // retain this for reporting
 	if (entry->coder.avioctx)
 		entry->coder.avioctx->opaque = &entry->coder; // format context pointer must point to new coder
@@ -935,6 +939,9 @@ static bool media_player_cache_entry_init(struct media_player *mp, const rtp_pay
 	codec_init_payload_type(&entry->coder.handler->source_pt, MT_UNKNOWN);
 	codec_init_payload_type(&entry->coder.handler->dest_pt, MT_UNKNOWN);
 	call_memory_arena_set(mp->call);
+
+	payload_type_clear(&src_pt_cpy);
+	payload_type_clear(&dst_pt_cpy);
 
 	// use low priority (10 nice)
 	thread_create_detach_prio(media_player_cache_entry_decoder_thread, obj_get(entry), NULL, 10, "mp decoder");
@@ -1236,7 +1243,7 @@ static bool media_player_read_packet(struct media_player *mp) {
 void media_player_set_sink(struct media_player *mp) {
 	struct call_media *media = mp->media;
 	if (media->streams.head) {
-		mp->sink.sink = media->streams.head->data;
+		mp->sink.sink = media->streams.head;
 		sink_handler_set_generic(&mp->sink);
 	}
 	if (!mp->ssrc_out || mp->ssrc_out->h.ssrc != mp->ssrc) {
@@ -1651,11 +1658,7 @@ static void call_ml_moh_handle_flags(struct call_monologue *from_ml, struct call
 
 	/* check zero-connection */
 	if (ML_ISSET(moh_ml, MOH_ZEROCONN)) {
-		struct packet_stream *ps;
-		__auto_type msl = audio->streams.head;
-		while (msl)
-		{
-			ps = msl->data;
+		IQUEUE_FOREACH(&audio->streams, ps) {
 			if (PS_ISSET(ps, RTP)) { /* find RTP stream, and don't touch RTCP */
 				ilog(LOG_DEBUG, "Forced packet stream of '"STR_FORMAT"' (media index: '%d')"
 						"to zero_addr due to MoH zero-connection.",
@@ -1663,7 +1666,6 @@ static void call_ml_moh_handle_flags(struct call_monologue *from_ml, struct call
 				PS_SET(ps, ZERO_ADDR);
 				goto check_next; /* stop */
 			}
-			msl = msl->next;
 		}
 	}
 check_next:
@@ -2214,7 +2216,7 @@ static void __media_player_cache_entry_free(struct media_player_cache_entry *e) 
 		kernel_free_packet_stream(e->kernel_idx);
 	g_free(e->index.index.file.s);
 	payload_type_clear(&e->index.dst_pt);
-	memory_arena_free(&e->arena);
+	arena_free(&e->arena);
 }
 #endif
 

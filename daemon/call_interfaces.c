@@ -78,7 +78,7 @@ static str streams_print(medias_arr *s, int start, int end, const char *prefix, 
 			ilog(LOG_WARNING, "Media has no streams");
 			break;
 		}
-		ps = media->streams.head->data;
+		ps = media->streams.head;
 
 		if (format == SAF_TCP)
 			call_stream_address(o, ps, format, NULL, true);
@@ -151,7 +151,7 @@ fail:
 
 static void updated_created_from(call_t *c, const char *addr) {
 	if (!c->created_from.len && addr)
-		c->created_from = call_str_cpy_c(addr);
+		c->created_from = memory_arena_str_cpy_c_lw(addr);
 }
 
 static str call_update_lookup_udp(char **out, enum ng_opmode opmode, const char* addr) {
@@ -612,7 +612,7 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char *addr)
 	updated_created_from(call, addr);
 
 	if (flags.xmlrpc_callback.len)
-		call->xmlrpc_callback = call_str_cpy(&flags.xmlrpc_callback);
+		memory_arena_str_cpy_free(&call->xmlrpc_callback, &flags.xmlrpc_callback);
 	if (flags.dtmf_log_dest.address.family)
 		call->dtmf_log_dest = flags.dtmf_log_dest;
 
@@ -647,7 +647,7 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char *addr)
 		call_set_dtmf_block(call, from_ml, &flags);
 
 	if (flags.alias_key == AK_SDP)
-		t_hash_table_insert(call->sdps, call_str_dup(&sdp), from_ml);
+		t_hash_table_replace(call->sdps, memory_arena_str_dup_lw(&sdp), from_ml);
 	else if (flags.alias_key == AK_ADDRESS && streams.length && streams.head->data->rtp_endpoint.port)
 		t_hash_table_insert(call->endpoints, memory_arena_objdup(streams.head->data->rtp_endpoint),
 				from_ml);
@@ -689,6 +689,21 @@ static const char *call_offer_answer_ng(ng_command_ctx_t *ctx, const char *addr)
 		/* place return output SDP */
 		ctx->ngbuf->sdp_out = sdp_out.s;
 		ctx->parser_ctx.parser->dict_add_str(output, "sdp", &sdp_out);
+
+		/* report the SSRCs picked for media sent towards the recipient of this SDP,
+		 * one entry per m= section */
+		if (flags.fixed_egress_ssrc && to_ml->medias) {
+			parser_arg ssrcs = parser->dict_add_list(output, "egress SSRC");
+			for (unsigned int i = 0; i < to_ml->medias->len; i++) {
+				struct call_media *media = to_ml->medias->pdata[i];
+				if (!media || !media->fixed_egress_ssrc)
+					continue;
+				parser_arg ent = parser->list_add_dict(ssrcs);
+				parser->dict_add_int(ent, "index", media->index);
+				parser->dict_add_str(ent, "type", &media->type);
+				parser->dict_add_int(ent, "SSRC", media->fixed_egress_ssrc);
+			}
+		}
 		if (flags.supports_rollback) {
 			parser_arg supported = parser->dict_add_list(output, "supported");
 			parser->list_add_string(supported, "rollback");
@@ -928,7 +943,6 @@ static void ng_stats_media(ng_command_ctx_t *ctx, parser_arg list, const struct 
 		struct call_stats *totals, parser_arg ssrc)
 {
 	parser_arg dict, streams = {0}, flags;
-	struct packet_stream *ps;
 	const rtp_payload_type *rtp_pt = NULL;
 
 	if (!ctx)
@@ -946,6 +960,11 @@ static void ng_stats_media(ng_command_ctx_t *ctx, parser_arg list, const struct 
 		parser->dict_add_string(dict, "protocol", m->protocol->name);
 	if (rtp_pt)
 		parser->dict_add_str_dup(dict, "codec", &rtp_pt->encoding_with_params);
+
+	/* available right away, unlike the `egress SSRCs` list below, which only
+	 * fills in once a packet has been forwarded */
+	if (m->fixed_egress_ssrc)
+		parser->dict_add_int(dict, "fixed egress SSRC", m->fixed_egress_ssrc);
 
 	streams = parser->dict_add_list(dict, "streams");
 
@@ -985,10 +1004,8 @@ static void ng_stats_media(ng_command_ctx_t *ctx, parser_arg list, const struct 
 	ng_stats_ssrc(parser, NULL, parser->dict_add_list(dict,  "egress SSRCs"), &m->ssrc_hash_out);
 
 stats:
-	for (auto_iter(l, m->streams.head); l; l = l->next) {
-		ps = l->data;
+	IQUEUE_FOREACH(&m->streams, ps)
 		ng_stats_stream(ctx, streams, ps, totals);
-	}
 }
 
 static void ng_stats_monologue(ng_command_ctx_t *ctx, parser_arg dict, const struct call_monologue *ml,
@@ -1186,7 +1203,6 @@ void ng_call_stats(ng_command_ctx_t *ctx, call_t *call, const str *fromtag, cons
 {
 	parser_arg tags = {0}, dict;
 	const str *match_tag;
-	struct call_monologue *ml;
 	struct call_stats t_b;
 	parser_arg ssrc = {0};
 	const ng_parser_t *parser = NULL;
@@ -1219,13 +1235,11 @@ stats:
 	match_tag = (totag && totag->s && totag->len) ? totag : fromtag;
 
 	if (!match_tag || !match_tag->len) {
-		for (__auto_type l = call->monologues.head; l; l = l->next) {
-			ml = l->data;
+		IQUEUE_FOREACH(&call->monologues, ml)
 			ng_stats_monologue(ctx, tags, ml, totals, ssrc);
-		}
 	}
 	else {
-		ml = call_get_monologue(call, match_tag);
+		__auto_type ml = call_get_monologue(call, match_tag);
 		if (ml) {
 			ng_stats_monologue(ctx, tags, ml, totals, ssrc);
 			g_auto(GQueue) mls = G_QUEUE_INIT; /* to avoid duplications */
@@ -1411,19 +1425,19 @@ static const char *media_match(call_t *call, struct call_monologue **monologue,
 		if (!sockaddr_parse_any_str(&addr, &flags->address))
 			return "Failed to parse network address";
 		// walk our structures to find a matching stream
-		for (__auto_type l = call->monologues.head; l; l = l->next) {
-			*monologue = l->data;
-			for (unsigned int k = 0; k < (*monologue)->medias->len; k++) {
-				struct call_media *media = (*monologue)->medias->pdata[k];
+		IQUEUE_FOREACH(&call->monologues, ml) {
+			*monologue = ml;
+			for (unsigned int k = 0; k < ml->medias->len; k++) {
+				struct call_media *media = ml->medias->pdata[k];
 				if (!media)
 					continue;
 				if (!media->streams.head)
 					continue;
-				struct packet_stream *ps = media->streams.head->data;
+				struct packet_stream *ps = media->streams.head;
 				if (!sockaddr_eq(&addr, &ps->advertised_endpoint.address))
 					continue;
 				ilog(LOG_DEBUG, "Matched address %s%s%s to tag '" STR_FORMAT_M "'",
-						FMT_M(sockaddr_print_buf(&addr)), STR_FMT_M(&(*monologue)->tag));
+						FMT_M(sockaddr_print_buf(&addr)), STR_FMT_M(&ml->tag));
 				goto found;
 			}
 		}
@@ -1468,7 +1482,8 @@ static const char *media_block_match(call_t **call, struct call_monologue **mono
 
 	// for generic ops, handle set-label here if given
 	if (IS_OP_OTHER(flags->opmode) && flags->set_label.len && *monologue) {
-		(*monologue)->label = call_str_cpy(&flags->set_label);
+		t_hash_table_remove((*call)->labels, &(*monologue)->label);
+		memory_arena_str_cpy_free(&(*monologue)->label, &flags->set_label);
 		t_hash_table_replace((*call)->labels, &(*monologue)->label, *monologue);
 	}
 
@@ -1496,8 +1511,7 @@ static const char *medias_match(call_q *calls, medias_q *medias,
 	call_t *call = calls->head->data;
 
 	if (flags->all == ALL_ALL) {
-		for (__auto_type l = call->medias.head; l; l = l->next) {
-			struct call_media *media = l->data;
+		IQUEUE_FOREACH(&call->medias, media) {
 			if (!media || (media->monologue->tagtype != FROM_TAG &&
 				media->monologue->tagtype != TO_TAG))
 			{
@@ -1599,10 +1613,8 @@ const char *call_stop_forwarding_ng(ng_command_ctx_t *ctx) {
 		ilog(LOG_INFO, "Stop forwarding (entire call)");
 		CALL_CLEAR(call, REC_FORWARDING);
 		if (flags.all == ALL_ALL) {
-			for (__auto_type l = call->monologues.head; l; l = l->next) {
-				monologue = l->data;
-				ML_CLEAR(monologue, REC_FORWARDING);
-			}
+			IQUEUE_FOREACH(&call->monologues, ml)
+				ML_CLEAR(ml, REC_FORWARDING);
 		}
 	}
 
@@ -1682,10 +1694,8 @@ static void call_set_dtmf_block(call_t *call, struct call_monologue *monologue, 
 		if (monologue)
 			call_monologue_set_block_mode(monologue, flags);
 		else {
-			for (__auto_type l = call->monologues.head; l; l = l->next) {
-				struct call_monologue *ml = l->data;
+			IQUEUE_FOREACH(&call->monologues, ml)
 				call_monologue_set_block_mode(ml, flags);
-			}
 		}
 	}
 
@@ -1738,25 +1748,24 @@ const char *call_unblock_dtmf_ng(ng_command_ctx_t *ctx) {
 		enum block_dtmf_mode prev_mode = call->block_dtmf;
 		call->block_dtmf = BLOCK_DTMF_OFF;
 		if (flags.all == ALL_ALL || is_dtmf_replace_mode(prev_mode) || flags.delay_buffer >= 0) {
-			for (__auto_type l = call->monologues.head; l; l = l->next) {
-				monologue = l->data;
+			IQUEUE_FOREACH(&call->monologues, ml) {
 				enum block_dtmf_mode prev_ml_mode = BLOCK_DTMF_OFF;
 				if (flags.all == ALL_ALL) {
-					prev_ml_mode = monologue->block_dtmf;
-					monologue->block_dtmf = BLOCK_DTMF_OFF;
+					prev_ml_mode = ml->block_dtmf;
+					ml->block_dtmf = BLOCK_DTMF_OFF;
 				}
 				if (flags.delay_buffer >= 0) {
-					for (unsigned int i = 0; i < monologue->medias->len; i++) {
-						struct call_media *media = monologue->medias->pdata[i];
+					for (unsigned int i = 0; i < ml->medias->len; i++) {
+						struct call_media *media = ml->medias->pdata[i];
 						if (!media)
 							continue;
 						media->buffer_delay = flags.delay_buffer;
 					}
 				}
-				bf_set_clear(&monologue->ml_flags, ML_FLAG_DETECT_DTMF, flags.detect_dtmf);
+				bf_set_clear(&ml->ml_flags, ML_FLAG_DETECT_DTMF, flags.detect_dtmf);
 				if (is_dtmf_replace_mode(prev_ml_mode) || is_dtmf_replace_mode(prev_mode)
 						|| flags.delay_buffer >= 0)
-					codec_update_all_handlers(monologue);
+					codec_update_all_handlers(ml);
 			}
 		}
 	}
@@ -1907,10 +1916,8 @@ static const char *call_block_silence_media(ng_command_ctx_t *ctx, bool on_off, 
 		if (!on_off) {
 			ilog(LOG_INFO, "%s media (entire call and participants)", ucase_verb);
 			if (flags.all == ALL_ALL) {
-				for (__auto_type l = call->monologues.head; l; l = l->next) {
-					monologue = l->data;
-					bf_set_clear(&monologue->ml_flags, ml_flag, on_off);
-				}
+				IQUEUE_FOREACH(&call->monologues, ml)
+					bf_set_clear(&ml->ml_flags, ml_flag, on_off);
 			}
 		} else {
 			ilog(LOG_INFO, "%s media (entire call)", ucase_verb);
@@ -1954,7 +1961,8 @@ static const char *play_media_select_party(call_t **call, monologues_q *monologu
 	if (err)
 		return err;
 	if (flags->all == ALL_ALL)
-		t_queue_append(monologues, &(*call)->monologues);
+		IQUEUE_FOREACH(&(*call)->monologues, ml)
+			t_queue_push_tail(monologues, ml);
 	else if (!monologue)
 		return "No participant party specified";
 	else
@@ -2590,7 +2598,7 @@ const char *call_transform_ng(ng_command_ctx_t *ctx) {
 		parser->dict_add_str_dup(dict, "id", &m->media_id);
 		if (!m->streams.head)
 			continue;
-		__auto_type ps = m->streams.head->data;
+		__auto_type ps = m->streams.head;
 		if (!ps->selected_sfd)
 			continue;
 		__auto_type sfd = ps->selected_sfd;

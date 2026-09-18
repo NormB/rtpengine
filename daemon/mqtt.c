@@ -390,7 +390,7 @@ static void mqtt_media_stats(struct call_media *media, JsonBuilder *json) {
 			json_builder_add_string_value(json, "inactive");
 	}
 
-	struct packet_stream *ps = media->streams.head ? media->streams.head->data : NULL;
+	struct packet_stream *ps = media->streams.head ?: NULL;
 
 
 	mutex_lock(&media->ssrc_hash_in.lock);
@@ -479,9 +479,7 @@ static void mqtt_full_call(call_t *call, JsonBuilder *json) {
 	json_builder_set_member_name(json, "legs");
 	json_builder_begin_array(json);
 
-	for (__auto_type l = call->monologues.head; l; l = l->next) {
-		struct call_monologue *ml = l->data;
-
+	IQUEUE_FOREACH(&call->monologues, ml) {
 		json_builder_begin_object(json);
 
 		mqtt_monologue_stats(ml, json);

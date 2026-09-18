@@ -86,12 +86,12 @@ include ../lib/common.Makefile
 	daemon-tests-measure-rtp daemon-tests-mos-legacy daemon-tests-mos-fullband daemon-tests-config-file \
 	daemon-tests-templ-def daemon-tests-templ-def-offer daemon-tests-t38 daemon-tests-evs-dtx \
 	daemon-tests-transform daemon-tests-http daemon-tests-heuristic daemon-tests-asymmetric \
-	daemon-tests-dtx-no-shift daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext \
+	daemon-tests-dtx-no-shift daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext daemon-tests-ssrc \
 	daemon-tests-bundle daemon-tests-dtls daemon-tests-rollback \
 	daemon-tests-rollback-redis \
 	daemon-tests-recording daemon-tests-create daemon-tests-alias \
 	daemon-tests-kernel-api \
-	daemon-tests-video
+	daemon-tests-video daemon-tests-inject
 
 TESTS := test-bitstr aes-crypt aead-aes-crypt test-const_str_hash.strhash
 ifeq ($(with_transcoding),yes)
@@ -139,13 +139,13 @@ daemon-tests: daemon-tests-main daemon-tests-jb daemon-tests-pubsub daemon-tests
 	daemon-tests-sdp-manipulations daemon-tests-sdes-manipulations \
 	daemon-tests-sdp-orig-replacements daemon-tests-moh daemon-tests-evs-dtx daemon-tests-transform \
 	daemon-tests-transcode-config daemon-tests-codec-prefs daemon-tests-http daemon-tests-heuristic \
-	daemon-tests-asymmetric daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext \
+	daemon-tests-asymmetric daemon-tests-rtcp daemon-tests-redis-subscribe daemon-tests-rtp-ext daemon-tests-ssrc \
 	daemon-tests-bundle daemon-tests-dtls daemon-tests-rollback daemon-tests-rollback-redis \
 	daemon-tests-recording daemon-tests-create \
 	daemon-tests-dtx daemon-tests-dtx-cn daemon-tests-dtx-no-shift \
 	daemon-tests-alias \
 	daemon-tests-kernel-api \
-	daemon-tests-video
+	daemon-tests-video daemon-tests-inject
 
 daemon-test-deps:	tests-preload.so
 	$(MAKE) -C ../daemon
@@ -283,6 +283,9 @@ daemon-tests-evs-dtx:	daemon-test-deps
 daemon-tests-video:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-video.pl
 
+daemon-tests-inject:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-inject.pl
+
 daemon-tests-codec-prefs:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-codec-prefs.pl
 
@@ -294,6 +297,9 @@ daemon-tests-rtcp:	daemon-test-deps
 
 daemon-tests-rtp-ext:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-rtp-ext.pl
+
+daemon-tests-ssrc:	daemon-test-deps
+	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-ssrc.pl
 
 daemon-tests-bundle:	daemon-test-deps
 	./auto-test-helper "$@" perl -I../perl auto-daemon-tests-bundle.pl
@@ -315,6 +321,7 @@ test-mix-buffer:	test-mix-buffer.o \
 	../daemon/helpers.o \
 	../daemon/rtp.o \
 	../daemon/ssrc.o \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/bufferpool.o \
@@ -347,6 +354,7 @@ spandsp_raw_fax_tests: spandsp_send_fax_pcm spandsp_recv_fax_pcm spandsp_send_fa
 test-amr-decode: test-amr-decode.o \
 	$(COMMONOBJS) \
 	../lib/amr.strhash.o \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/cchain.o \
@@ -361,6 +369,7 @@ test-amr-decode: test-amr-decode.o \
 test-amr-encode: test-amr-encode.o \
 	$(COMMONOBJS) \
 	../lib/amr.strhash.o \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/cchain.o \
@@ -374,15 +383,14 @@ test-amr-encode: test-amr-encode.o \
 
 test-dtmf-detect: test-dtmf-detect.o
 
-aes-crypt:	aes-crypt.o $(COMMONOBJS) ../daemon/crypto.o ../lib/bencode.o log.o
+aes-crypt:	aes-crypt.o $(COMMONOBJS) ../daemon/crypto.o ../lib/arena.o ../lib/bencode.o log.o
 
-aead-decrypt:	aead-decrypt.o $(COMMONOBJS) ../daemon/crypto.o ../daemon/rtp.o ../lib/bencode.o log.o
+aead-decrypt:	aead-decrypt.o $(COMMONOBJS) ../daemon/crypto.o ../daemon/rtp.o ../lib/arena.o ../lib/bencode.o log.o
 
-aead-aes-crypt:	aead-aes-crypt.o $(COMMONOBJS) ../daemon/crypto.o ../lib/bencode.o log.o
+aead-aes-crypt:	aead-aes-crypt.o $(COMMONOBJS) ../daemon/crypto.o ../lib/arena.o ../lib/bencode.o log.o
 
 test-stats:	test-stats.o \
 	$(COMMONOBJS) \
-	../daemon/arena.o \
 	../daemon/audio_player.o \
 	../daemon/call_flags.strhash.o \
 	../daemon/call_interfaces.o \
@@ -408,6 +416,7 @@ test-stats:	test-stats.o \
 	../daemon/load.o \
 	../daemon/media_player.o \
 	../daemon/media_socket.o \
+	../daemon/memory_arena.o \
 	../daemon/mqtt.o \
 	../daemon/ng_client.o \
 	../daemon/recording.o \
@@ -423,6 +432,7 @@ test-stats:	test-stats.o \
 	../daemon/timerthread.o \
 	../daemon/udp_listener.o \
 	../daemon/websocket.o \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/bufferpool.o \
@@ -445,7 +455,6 @@ test-stats:	test-stats.o \
 
 test-transcode:	test-transcode.o \
 	$(COMMONOBJS) \
-	../daemon/arena.o \
 	../daemon/audio_player.o \
 	../daemon/call_flags.strhash.o \
 	../daemon/call_interfaces.o \
@@ -470,6 +479,7 @@ test-transcode:	test-transcode.o \
 	../daemon/load.o \
 	../daemon/media_player.o \
 	../daemon/media_socket.o \
+	../daemon/memory_arena.o \
 	../daemon/mqtt.o \
 	../daemon/ng_client.o \
 	../daemon/recording.o \
@@ -486,6 +496,7 @@ test-transcode:	test-transcode.o \
 	../daemon/udp_listener.o \
 	../daemon/websocket.o \
 	../lib/amr.strhash.o \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/bufferpool.o \
@@ -513,6 +524,7 @@ test-transcode:	test-transcode.o \
 
 test-sequencer:	test-sequencer.o \
 	$(COMMONOBJS) \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/cchain.o \
@@ -524,6 +536,7 @@ test-sequencer:	test-sequencer.o \
 
 test-resample:	test-resample.o \
 	$(COMMONOBJS) \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/cchain.o \
@@ -541,6 +554,7 @@ test-payload-tracker: test-payload-tracker.o \
 	../daemon/helpers.o \
 	../daemon/rtp.o \
 	../daemon/ssrc.o \
+	../lib/arena.o \
 	../lib/avc.o \
 	../lib/bencode.o \
 	../lib/bufferpool.o \
@@ -558,7 +572,7 @@ test-payload-tracker: test-payload-tracker.o \
 
 test-kernel-module: test-kernel-module.o $(COMMONOBJS) ../daemon/kernel.o
 
-test-const_str_hash.strhash: test-const_str_hash.strhash.o $(COMMONOBJS) ../lib/bencode.o log.o
+test-const_str_hash.strhash: test-const_str_hash.strhash.o $(COMMONOBJS) ../lib/arena.o ../lib/bencode.o log.o
 
 s3-auth:	s3-auth.o ../lib/s3utils.o
 

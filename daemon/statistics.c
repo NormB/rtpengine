@@ -121,7 +121,6 @@ void statistics_update_foreignown_inc(call_t * c) {
 }
 
 void statistics_update_oneway(call_t * c) {
-	struct call_monologue *ml;
 	struct call_media *md;
 
 	if (IS_OWN_CALL(c)) {
@@ -129,18 +128,16 @@ void statistics_update_oneway(call_t * c) {
 		unsigned int total_nopacket_relayed_sess = 0;
 		struct packet_stream *ps, *ps2;
 
-		for (__auto_type l = c->monologues.head; l; l = l->next) {
-			ml = l->data;
-
+		IQUEUE_FOREACH(&c->monologues, ml) {
 			// --- go through partner ml and search the RTP
 			for (unsigned int i = 0; i < ml->medias->len; i++) {
 				md = ml->medias->pdata[i];
 				if (!md)
 					continue;
 
-				for (__auto_type o = md->streams.head; o; o = o->next) {
-					ps = o->data;
-					if (PS_ISSET(ps, RTP)) {
+				IQUEUE_FOREACH(&md->streams, xps) {
+					if (PS_ISSET(xps, RTP)) {
+						ps = xps;
 						// --- only RTP is interesting
 						goto found;
 					}
@@ -167,7 +164,7 @@ found:;
 	}
 
 	if (c->monologues.head) {
-		ml = c->monologues.head->data;
+		__auto_type ml = c->monologues.head;
 
 		if (IS_OWN_CALL(c)) {
 			if (ml->term_reason==TIMEOUT)
@@ -684,8 +681,7 @@ stats_metric_q *statistics_gather_metrics(struct interface_sampled_rate_stats *i
 
 	HEADER("interfaces", NULL);
 	HEADER("[", NULL);
-	for (__auto_type l = all_local_interfaces.head; l; l = l->next) {
-		struct local_intf *lif = l->data;
+	IQUEUE_FOREACH(&all_local_interfaces, lif) {
 		// only show first-order interface entries: socket families must match
 		if (lif->logical->preferred_family != lif->spec->local_address.addr.family)
 			continue;

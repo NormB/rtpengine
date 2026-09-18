@@ -843,6 +843,7 @@ static void options(int *argc, char ***argv, charp_ht templates) {
 #endif
 		{ "log-format",	0, 0,	G_OPTION_ARG_STRING,	&log_format,	"Log prefix format",		"default|parsable"},
 		{ "xmlrpc-format",'x', 0, G_OPTION_ARG_INT,	&rtpe_config.fmt,	"XMLRPC timeout request format to use. 0: SEMS DI, 1: call-id only, 2: Kamailio",	"INT"	},
+		{ "lightweight",0,0,	G_OPTION_ARG_NONE,	&rtpe_config.lightweight,	"Decrease use of memory arenas",	NULL	},
 		{ "num-threads",  0, 0, G_OPTION_ARG_INT,	&rtpe_config.num_threads,	"Number of worker threads to create",	"INT"	},
 		{ "media-num-threads",  0, 0, G_OPTION_ARG_INT,	&rtpe_config.media_num_threads,	"Number of worker threads for media playback",	"INT"	},
 		{ "kernel-num-threads", 0, 0, G_OPTION_ARG_INT,	&rtpe_config.kernel_num_threads,"Number of worker threads for kernel RTP",	"INT"	},
@@ -1706,7 +1707,7 @@ RTPE_CONFIG_CHARPP_PARAMS
 static void early_init(void) {
 	socket_init(); // needed for socktype_udp
 	rtpe_bufferpool = bufferpool_new(bufferpool_aligned_alloc, bufferpool_aligned_free);
-	memory_arena_init(&rtpe_arena);
+	arena_init(&rtpe_arena, g_malloc, g_free);
 	memory_arena = &rtpe_arena;
 }
 
@@ -1850,6 +1851,9 @@ static void init_everything(charp_ht templates) {
 
 static void create_everything(void) {
 	rtpe_now = now_us();
+
+	if (rtpe_config.lightweight || getenv("RTPENGINE_LIGHTWEIGHT"))
+		memory_arena_set_leightweight();
 
 	// either one global poller, or one per thread for media sockets plus one for control sockets
 #ifdef HAVE_LIBURING
@@ -2249,7 +2253,7 @@ int main(int argc, char **argv) {
 	kernel_shutdown_table();
 	options_free();
 	bufferpool_cleanup();
-	memory_arena_free(&rtpe_arena);
+	arena_free(&rtpe_arena);
 	bufferpool_destroy(rtpe_bufferpool);
 
 	return 0;
